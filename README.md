@@ -1,4 +1,4 @@
-✈️ AeroMap / AeroArchive
+# AeroMap
 
 Historical Aerial Maps — Accessible, Searchable, Viewable Anywhere
 
@@ -22,4 +22,3 @@ Pluggable tile service support depending on your hosting environment.
 Deploy anywhere: Cloudflare Pages, GitHub Pages, Netlify, S3, etc.
 	•	Optional Worker proxy
 Cloudflare Worker can mirror the site directly from GitHub for auto-updates.
-# AeroMap
