@@ -43,24 +43,27 @@
       border: 1px solid rgba(255,255,255,0.1); 
       display: flex; 
       align-items: center; 
-      gap: 20px; 
+      gap: 16px; 
       pointer-events: auto; 
     }
 
-    /* Play Button */
-    .btn-play { 
-      width: 44px; height: 44px; 
-      border-radius: 50%; 
-      background: var(--primary); 
+    /* Nav Buttons */
+    .btn {
+      height: 40px; min-width: 40px;
+      border-radius: 12px;
+      background: var(--primary);
       border: none; color: white; 
       font-size: 18px; cursor: pointer; 
       display: grid; place-items: center; 
-      transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94); 
-      flex-shrink: 0; padding-left: 4px; 
-      box-shadow: 0 4px 12px rgba(30, 144, 255, 0.3);
+      transition: transform 0.1s;
+      box-shadow: 0 4px 12px rgba(30,144,255,0.3);
     }
-    .btn-play.paused { padding-left: 0; }
-    .btn-play:active { transform: scale(0.92); }
+    .btn:active { transform: scale(0.96); }
+    .btn.secondary {
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.15);
+    }
 
     /* Timeline Track */
     .timeline-track-wrapper { 
@@ -138,22 +141,7 @@
       background-repeat: no-repeat;
     }
 
-    /* Controls: Support + Brand */
-    .leaflet-control.support-control a {
-      display: inline-block;
-      text-decoration: none;
-      background: var(--bg-glass);
-      border: 1px solid rgba(255,255,255,0.12);
-      padding: 6px 10px;
-      border-radius: 12px;
-      font-weight: 700;
-      font-size: 12px;
-      color: #fff;
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-    }
-    .leaflet-control.support-control a:hover { filter: brightness(1.1); }
-
+    /* Brand badge */
     .leaflet-control.brand-badge {
       background: var(--bg-glass);
       border: 1px solid rgba(255,255,255,0.12);
@@ -172,11 +160,10 @@
     @media (max-width: 640px) {
       .ui-layer { bottom: 20px; width: 92vw; }
       .controls-card { flex-wrap: wrap; padding: 16px; gap: 12px; justify-content: space-between; }
-      .btn-play { order: 1; }
-      .info-panel { order: 2; align-items: center; flex-direction: row; gap: 10px; }
+      .info-panel { order: 3; align-items: center; flex-direction: row; gap: 10px; width: 100%; }
       .label-sub { margin-top: 0; display: none; }
-      .timeline-track-wrapper { order: 3; flex-basis: 100%; width: 100%; margin-top: 10px; height: 44px; }
-      .loader { position: absolute; top: 16px; left: 70px; } 
+      .timeline-track-wrapper { order: 2; flex-basis: 100%; width: 100%; margin-top: 10px; height: 44px; }
+      .loader { position: absolute; top: 16px; left: 60px; } 
       .time-select { font-size: 15px; padding: 8px 34px 8px 10px; }
     }
   </style>
@@ -194,7 +181,8 @@
 
 <div class="ui-layer">
   <div class="controls-card">
-    <button class="btn-play" id="playBtn" title="Play/Pause">▶</button>
+    <button class="btn secondary" id="prevBtn" title="Previous (←)" aria-label="Previous">&#x25C0;</button>
+
     <div class="loader" id="loader"></div>
     
     <div class="timeline-track-wrapper" id="trackWrapper">
@@ -209,6 +197,8 @@
       <select id="timeSelect" class="time-select" aria-label="Select timeframe"></select>
       <div class="label-sub" id="lblRange">Timeline</div>
     </div>
+
+    <button class="btn" id="nextBtn" title="Next (→)" aria-label="Next">&#x25B6;</button>
   </div>
 </div>
 
@@ -221,10 +211,10 @@ const CONFIG = {
   rdntEndpoint: 'https://tiles.rdnt.io/tiles',
   rdntQuery: '&rgb=1,2,3',
   baseUrl: 'https://aeromap.io/dfw/',
-  csvUrl: 'https://hemenway.github.io/collection.csv', // Dynamic Source
-  animationSpeed: 1000,
+  csvUrl: 'https://hemenway.github.io/collection.csv',
+  animationSpeed: 1000, // no autoplay; retained for potential future use
   initialView: { center: [32.7767, -96.7970], zoom: 10 },
-  frames: [] // Will be populated dynamically
+  frames: []
 };
 
 /** UTILITIES **/
@@ -308,7 +298,7 @@ class MapController {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &middot; &copy; <a href="https://carto.com/attributions">CARTO</a>'
     }).addTo(this.map);
 
-    // --- Top-left brand badge: "AeroMap"
+    // Top-left brand badge: "AeroMap"
     const BrandControl = L.Control.extend({
       options: { position: 'topleft' },
       onAdd: function () {
@@ -319,18 +309,6 @@ class MapController {
       }
     });
     this.map.addControl(new BrandControl());
-
-    // --- Bottom-left support button
-    const SupportControl = L.Control.extend({
-      options: { position: 'bottomleft' },
-      onAdd: function() {
-        const div = L.DomUtil.create('div', 'leaflet-control support-control');
-        div.innerHTML = `<a href="https://buymeacoffee.com/ryanhemenway" target="_blank" rel="noopener" aria-label="Support the project">❤️ Support the project</a>`;
-        L.DomEvent.disableClickPropagation(div);
-        return div;
-      }
-    });
-    this.map.addControl(new SupportControl());
 
     L.control.zoom({ position: 'topright' }).addTo(this.map);
 
@@ -430,11 +408,10 @@ class TimelineApp {
     this.frames.forEach((f, i) => { const d = dates[i]; f.pct = max === min ? 0 : ((d - min) / (max - min)) * 100; });
 
     this.currentIndex = 0;
-    this.isPlaying = false;
-    this.timer = null;
 
     this.ui = {
-      playBtn: document.getElementById('playBtn'),
+      prevBtn: document.getElementById('prevBtn'),
+      nextBtn: document.getElementById('nextBtn'),
       progress: document.getElementById('progress'),
       handle: document.getElementById('handle'),
       track: document.getElementById('trackWrapper'),
@@ -446,8 +423,8 @@ class TimelineApp {
     this.initUI();
     this.update(0);
 
+    // Keyboard shortcuts
     window.addEventListener('keydown', (e) => {
-      if (e.key === ' ') { this.togglePlay(); e.preventDefault(); }
       if (e.key === 'ArrowRight') this.step(1);
       if (e.key === 'ArrowLeft') this.step(-1);
     });
@@ -456,7 +433,7 @@ class TimelineApp {
   initUI() {
     this.ui.lblRange.textContent = `${this.frames[0].id} — ${this.frames[this.frames.length-1].id}`;
 
-    // populate dropdown
+    // dropdown
     this.ui.timeSelect.innerHTML = '';
     this.frames.forEach((f, i) => {
       const opt = document.createElement('option');
@@ -467,7 +444,6 @@ class TimelineApp {
     this.ui.timeSelect.addEventListener('change', () => {
       const idx = parseInt(this.ui.timeSelect.value, 10);
       if (!Number.isNaN(idx) && idx >= 0 && idx < this.frames.length) {
-        this.stop(); 
         this.update(idx);
       }
     });
@@ -480,10 +456,11 @@ class TimelineApp {
       this.ui.ticks.appendChild(tick);
     });
 
-    // play
-    this.ui.playBtn.onclick = () => this.togglePlay();
+    // nav buttons
+    this.ui.prevBtn.addEventListener('click', () => this.step(-1));
+    this.ui.nextBtn.addEventListener('click', () => this.step(1));
 
-    // drag on the track/handle
+    // drag on track
     const handleInput = (clientX) => {
       const rect = this.ui.track.getBoundingClientRect();
       const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
@@ -501,7 +478,6 @@ class TimelineApp {
     let isDragging = false;
     const startDrag = (e) => { 
         isDragging = true; 
-        this.stop(); 
         handleInput((e.touches?.[0]?.clientX) ?? e.clientX); 
     };
     const moveDrag  = (e) => { if (isDragging) handleInput((e.touches?.[0]?.clientX) ?? e.clientX); };
@@ -534,46 +510,36 @@ class TimelineApp {
   }
 
   step(dir) {
-    this.stop();
     let next = this.currentIndex + dir;
     if (next >= this.frames.length) next = 0;
     if (next < 0) next = this.frames.length - 1;
     this.update(next);
   }
-
-  togglePlay() {
-    if (this.isPlaying) this.stop(); else this.play();
-  }
-
-  play() {
-    this.isPlaying = true;
-    this.ui.playBtn.textContent = '❚❚';
-    this.ui.playBtn.classList.add('paused');
-    this.timer = setInterval(() => this.update((this.currentIndex + 1) % this.frames.length), CONFIG.animationSpeed);
-  }
-
-  stop() {
-    this.isPlaying = false;
-    this.ui.playBtn.textContent = '▶';
-    this.ui.playBtn.classList.remove('paused');
-    clearInterval(this.timer);
-  }
 }
 
 // Initialize Application
 async function initApp() {
-  await loadData(); // Fetch and parse CSV first
-  
+  await loadData();
   if (CONFIG.frames.length === 0) {
     Utils.toast("No valid frames found in CSV");
     return;
   }
-  
   const mapCtrl = new MapController('map');
   new TimelineApp(mapCtrl);
 }
-
 document.addEventListener('DOMContentLoaded', initApp);
 </script>
+
+<!-- Buy Me a Coffee floating widget -->
+<script data-name="BMC-Widget" data-cfasync="false"
+  src="https://cdnjs.buymeacoffee.com/1.0.0/widget.prod.min.js"
+  data-id="ryanhemenway"
+  data-description="Support me on Buy me a coffee!"
+  data-message="Support this Project"
+  data-color="#FF813F"
+  data-position="Right"
+  data-x_margin="18"
+  data-y_margin="18"></script>
+
 </body>
 </html>
