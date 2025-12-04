@@ -4,31 +4,174 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>Sectional Time Machine</title>
+  <title>AeroMap - Historical Aeronautical Chart Viewer</title>
+  <meta name="description" content="Explore historical aeronautical charts and sectional maps. View how aviation charts have evolved over time with AeroMap's interactive timeline viewer." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✈️</text></svg>" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     :root {
       --primary: #1e90ff;
-      --bg-glass: rgba(20, 25, 30, 0.85);
+      --primary-hover: #4da6ff;
+      --secondary: #00d4aa;
+      --bg-glass: rgba(20, 25, 30, 0.90);
+      --bg-dark: #0a0e12;
       --text-light: #fff;
+      --text-muted: rgba(255, 255, 255, 0.6);
       --timeline-h: 6px;
       --card-radius: 16px;
+      --transition-smooth: cubic-bezier(0.4, 0.0, 0.2, 1);
     }
 
     html,
     body {
       height: 100%;
       margin: 0;
-      background: #111;
+      background: var(--bg-dark);
       font-family: system-ui, -apple-system, sans-serif;
       overflow: hidden;
+      color: var(--text-light);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+      }
+      to {
+        opacity: 1;
+      }
+    }
+
+    body {
+      animation: fadeIn 0.3s ease-in;
     }
 
     #map {
       height: 100%;
       width: 100%;
       z-index: 1;
-      background: #111;
+      background: var(--bg-dark);
+    }
+
+    /* Header Bar */
+    .header-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 70px;
+      background: linear-gradient(180deg, var(--bg-glass) 0%, transparent 100%);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 900;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      pointer-events: none;
+    }
+
+    .header-content {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      pointer-events: auto;
+    }
+
+    .site-logo {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      color: var(--text-light);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: color 0.2s var(--transition-smooth);
+    }
+
+    .site-logo:hover {
+      color: var(--primary-hover);
+    }
+
+    .site-tagline {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 500;
+      display: none;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 12px;
+      pointer-events: auto;
+    }
+
+    .icon-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: white;
+      font-size: 18px;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      transition: all 0.2s var(--transition-smooth);
+      text-decoration: none;
+    }
+
+    .icon-btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: var(--primary);
+      transform: translateY(-2px);
+    }
+
+    .icon-btn:active {
+      transform: translateY(0);
+    }
+
+    /* Info Panel in Header */
+    .chart-info {
+      position: absolute;
+      top: 80px;
+      left: 24px;
+      background: var(--bg-glass);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      z-index: 900;
+      max-width: 300px;
+      opacity: 0;
+      transform: translateY(-10px);
+      transition: all 0.3s var(--transition-smooth);
+      pointer-events: none;
+    }
+
+    .chart-info.visible {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+
+    .chart-info h3 {
+      margin: 0 0 4px 0;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-light);
+    }
+
+    .chart-info p {
+      margin: 0;
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.4;
     }
 
     /* Map Performance Tweaks */
@@ -81,24 +224,56 @@
       cursor: pointer;
       display: grid;
       place-items: center;
-      transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+      transition: all 0.2s var(--transition-smooth);
     }
 
     .btn-nav:hover {
       background: var(--primary);
       border-color: var(--primary);
-      box-shadow: 0 4px 12px rgba(30, 144, 255, 0.3);
+      box-shadow: 0 4px 12px rgba(30, 144, 255, 0.4);
+      transform: scale(1.05);
     }
 
     .btn-nav:active {
-      transform: scale(0.92);
+      transform: scale(0.95);
+    }
+
+    .btn-nav:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* Play button */
+    .btn-play {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+      border: none;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      transition: all 0.2s var(--transition-smooth);
+      box-shadow: 0 4px 12px rgba(30, 144, 255, 0.3);
+    }
+
+    .btn-play:hover {
+      transform: scale(1.1);
+      box-shadow: 0 6px 20px rgba(30, 144, 255, 0.5);
+    }
+
+    .btn-play:active {
+      transform: scale(0.98);
     }
 
     /* Timeline Track */
     .timeline-track-wrapper {
       flex: 1;
       position: relative;
-      height: 40px;
+      height: 50px;
       display: flex;
       align-items: center;
       cursor: pointer;
@@ -134,24 +309,52 @@
     }
 
     .tick.active {
-      background: #fff;
-      height: 16px;
+      background: var(--primary);
+      height: 18px;
+      width: 3px;
       opacity: 1;
-      box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+      box-shadow: 0 0 12px var(--primary);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% {
+        box-shadow: 0 0 12px var(--primary);
+      }
+      50% {
+        box-shadow: 0 0 20px var(--primary), 0 0 30px rgba(30, 144, 255, 0.5);
+      }
+    }
+
+    .tick.major {
+      height: 16px;
+      background: rgba(255, 255, 255, 0.6);
+    }
+
+    .tick-label {
+      position: absolute;
+      bottom: -24px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      pointer-events: none;
+      font-weight: 600;
     }
 
     /* Slider Handle */
     .handle {
       position: absolute;
-      width: 20px;
-      height: 20px;
-      background: #fff;
+      width: 22px;
+      height: 22px;
+      background: linear-gradient(135deg, #fff 0%, #e0e0e0 100%);
       border-radius: 50%;
       top: 50%;
       transform: translate(-50%, -50%);
-      box-shadow: 0 0 0 4px rgba(30, 144, 255, 0.4);
+      box-shadow: 0 0 0 4px rgba(30, 144, 255, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
       cursor: grab;
-      transition: transform 0.1s;
+      transition: all 0.2s var(--transition-smooth);
       z-index: 2;
     }
 
@@ -164,9 +367,14 @@
       bottom: -15px;
     }
 
+    .handle:hover {
+      transform: translate(-50%, -50%) scale(1.1);
+      box-shadow: 0 0 0 5px rgba(30, 144, 255, 0.6), 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+
     .handle:active {
       cursor: grabbing;
-      transform: translate(-50%, -50%) scale(1.15);
+      transform: translate(-50%, -50%) scale(1.2);
     }
 
     /* Info Panel */
@@ -259,6 +467,17 @@
         calc(100% - 12px) calc(50% - 3px);
       background-size: 6px 6px, 6px 6px;
       background-repeat: no-repeat;
+      transition: all 0.2s var(--transition-smooth);
+    }
+
+    .time-select:hover {
+      background-color: rgba(255, 255, 255, 0.12);
+      border-color: var(--primary);
+    }
+
+    .time-select:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(30, 144, 255, 0.2);
     }
 
     /* Controls: Brand */
@@ -277,8 +496,326 @@
       font-size: 13px;
     }
 
+    /* Keyboard Shortcuts Overlay */
+    .shortcuts-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 2000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transition: opacity 0.3s var(--transition-smooth);
+    }
+
+    .shortcuts-overlay.visible {
+      display: flex;
+      opacity: 1;
+    }
+
+    .shortcuts-content {
+      background: var(--bg-glass);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 20px;
+      padding: 32px;
+      max-width: 500px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+
+    .shortcuts-content h2 {
+      margin: 0 0 24px 0;
+      font-size: 24px;
+      font-weight: 800;
+      color: var(--text-light);
+    }
+
+    .shortcut-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .shortcut-item:last-child {
+      border-bottom: none;
+    }
+
+    .shortcut-desc {
+      font-size: 14px;
+      color: var(--text-light);
+    }
+
+    .shortcut-key {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: 'Courier New', monospace;
+      color: var(--primary);
+    }
+
+    .close-shortcuts {
+      width: 100%;
+      margin-top: 24px;
+      padding: 12px;
+      background: var(--primary);
+      border: none;
+      border-radius: 10px;
+      color: white;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s var(--transition-smooth);
+    }
+
+    .close-shortcuts:hover {
+      background: var(--primary-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(30, 144, 255, 0.4);
+    }
+
+    /* Share Panel */
+    .share-panel {
+      position: absolute;
+      top: 160px;
+      right: 24px;
+      background: var(--bg-glass);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      z-index: 900;
+      min-width: 280px;
+      display: none;
+    }
+
+    .share-panel.visible {
+      display: block;
+    }
+
+    .share-panel h4 {
+      margin: 0 0 12px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-light);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .share-url-box {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .share-url {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 10px;
+      color: var(--text-light);
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+      outline: none;
+      user-select: all;
+    }
+
+    .share-url:focus {
+      border-color: var(--primary);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .copy-btn {
+      padding: 10px 16px;
+      background: var(--primary);
+      border: none;
+      border-radius: 8px;
+      color: white;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s var(--transition-smooth);
+      white-space: nowrap;
+    }
+
+    .copy-btn:hover {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+
+    .copy-btn:active {
+      transform: translateY(0);
+    }
+
+    .copy-btn.copied {
+      background: var(--secondary);
+    }
+
+    .share-info {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-align: center;
+      margin-top: 8px;
+    }
+
+    /* Speed Control */
+    .speed-selector {
+      display: flex;
+      gap: 4px;
+      margin-top: 8px;
+      font-size: 11px;
+    }
+
+    .speed-btn {
+      flex: 1;
+      padding: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s var(--transition-smooth);
+      text-align: center;
+    }
+
+    .speed-btn:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text-light);
+    }
+
+    .speed-btn.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: white;
+    }
+
+    .speed-label {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-align: center;
+      margin-bottom: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* Opacity Control */
+    .opacity-control {
+      position: absolute;
+      top: 160px;
+      right: 24px;
+      background: var(--bg-glass);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      z-index: 900;
+      min-width: 200px;
+      display: none;
+    }
+
+    .opacity-control.visible {
+      display: block;
+    }
+
+    .opacity-control h4 {
+      margin: 0 0 12px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-light);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .opacity-slider {
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.2);
+      outline: none;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+
+    .opacity-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--primary);
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+
+    .opacity-slider::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--primary);
+      cursor: pointer;
+      border: none;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+
+    .opacity-value {
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 8px;
+    }
+
     /* --- MOBILE OPTIMIZATIONS --- */
     @media (max-width: 640px) {
+      .header-bar {
+        height: 60px;
+        padding: 0 16px;
+      }
+
+      .site-logo {
+        font-size: 20px;
+      }
+
+      .site-tagline {
+        display: none;
+      }
+
+      .header-actions .icon-btn {
+        width: 36px;
+        height: 36px;
+        font-size: 16px;
+      }
+
+      .chart-info {
+        top: 70px;
+        left: 16px;
+        right: 16px;
+        max-width: none;
+      }
+
+      .opacity-control,
+      .share-panel {
+        top: auto;
+        bottom: 140px;
+        right: 16px;
+        left: 16px;
+        min-width: 0;
+      }
+
       .ui-layer {
         bottom: 20px;
         width: 92vw;
@@ -312,7 +849,7 @@
         flex-basis: 100%;
         width: 100%;
         margin-top: 10px;
-        height: 44px;
+        height: 50px;
       }
 
       .loader {
@@ -324,6 +861,32 @@
       .time-select {
         font-size: 15px;
         padding: 8px 34px 8px 10px;
+      }
+
+      .shortcuts-content {
+        padding: 24px;
+      }
+
+      .shortcuts-content h2 {
+        font-size: 20px;
+      }
+
+      .tick-label {
+        display: none;
+      }
+
+      .speed-selector {
+        font-size: 10px;
+      }
+
+      .speed-btn {
+        padding: 5px;
+      }
+    }
+
+    @media (min-width: 768px) {
+      .site-tagline {
+        display: block;
       }
     }
   </style>
@@ -337,14 +900,95 @@
 
 <body>
 
+  <!-- Header Bar -->
+  <div class="header-bar">
+    <div class="header-content">
+      <a href="/" class="site-logo">
+        ✈️ AeroMap
+      </a>
+      <span class="site-tagline">Historical Aviation Charts</span>
+    </div>
+    <div class="header-actions">
+      <button class="icon-btn" id="shareBtn" title="Share (S)">🔗</button>
+      <button class="icon-btn" id="opacityBtn" title="Adjust Opacity">◐</button>
+      <button class="icon-btn" id="fullscreenBtn" title="Fullscreen (F)">⛶</button>
+      <button class="icon-btn" id="helpBtn" title="Keyboard Shortcuts (?)">?</button>
+      <a href="https://github.com/hemenway/AeroMap" target="_blank" rel="noopener" class="icon-btn" title="View on GitHub">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+      </a>
+    </div>
+  </div>
+
+  <!-- Chart Info Panel -->
+  <div class="chart-info" id="chartInfo">
+    <h3 id="chartTitle">Dallas-Fort Worth Sectional</h3>
+    <p id="chartDesc">Historical aeronautical sectional chart</p>
+  </div>
+
+  <!-- Opacity Control -->
+  <div class="opacity-control" id="opacityControl">
+    <h4>Chart Opacity</h4>
+    <input type="range" class="opacity-slider" id="opacitySlider" min="0" max="100" value="100">
+    <div class="opacity-value"><span id="opacityValue">100</span>%</div>
+  </div>
+
+  <!-- Share Panel -->
+  <div class="share-panel" id="sharePanel">
+    <h4>Share This View</h4>
+    <div class="share-url-box">
+      <input type="text" class="share-url" id="shareUrl" readonly>
+      <button class="copy-btn" id="copyBtn">Copy</button>
+    </div>
+    <div class="share-info">Share your current timeframe and map position</div>
+  </div>
+
+  <!-- Keyboard Shortcuts Overlay -->
+  <div class="shortcuts-overlay" id="shortcutsOverlay">
+    <div class="shortcuts-content">
+      <h2>⌨️ Keyboard Shortcuts</h2>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Next timeframe</span>
+        <span class="shortcut-key">→</span>
+      </div>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Previous timeframe</span>
+        <span class="shortcut-key">←</span>
+      </div>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Play/Pause animation</span>
+        <span class="shortcut-key">Space</span>
+      </div>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Toggle fullscreen</span>
+        <span class="shortcut-key">F</span>
+      </div>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Share current view</span>
+        <span class="shortcut-key">S</span>
+      </div>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Show this help</span>
+        <span class="shortcut-key">?</span>
+      </div>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Close overlay</span>
+        <span class="shortcut-key">Esc</span>
+      </div>
+      <button class="close-shortcuts" id="closeShortcuts">Close</button>
+    </div>
+  </div>
+
   <div id="map"></div>
   <div class="toast" id="toast"></div>
 
   <div class="ui-layer">
     <div class="controls-card">
       <div class="jog-controls">
-        <button class="btn-nav" id="prevBtn" title="Previous Timeframe">←</button>
-        <button class="btn-nav" id="nextBtn" title="Next Timeframe">→</button>
+        <button class="btn-nav" id="prevBtn" title="Previous Timeframe (←)">←</button>
+        <button class="btn-play" id="playBtn" title="Play/Pause (Space)">▶</button>
+        <button class="btn-nav" id="nextBtn" title="Next Timeframe (→)">→</button>
       </div>
       
       <div class="loader" id="loader"></div>
@@ -360,6 +1004,16 @@
       <div class="info-panel">
         <select id="timeSelect" class="time-select" aria-label="Select timeframe"></select>
         <div class="label-sub" id="lblRange">Timeline</div>
+      </div>
+    </div>
+    
+    <!-- Speed Control for Play -->
+    <div style="text-align: center; margin-top: 12px;">
+      <div class="speed-label">Animation Speed</div>
+      <div class="speed-selector">
+        <button class="speed-btn" data-speed="3000">Slow</button>
+        <button class="speed-btn active" data-speed="2000">Normal</button>
+        <button class="speed-btn" data-speed="1000">Fast</button>
       </div>
     </div>
   </div>
@@ -399,6 +1053,17 @@
           return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
         } catch (e) {
           return dateStr;
+        }
+      },
+      toggleFullscreen: () => {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(err => {
+            Utils.toast(`Error entering fullscreen: ${err.message}`);
+          });
+        } else {
+          if (document.exitFullscreen) {
+            document.exitFullscreen();
+          }
         }
       }
     };
@@ -543,8 +1208,9 @@
           await Promise.all(newLayers.map(l => this.waitForLayer(l)));
         }
 
+        const opacityValue = parseFloat(document.getElementById('opacitySlider')?.value || 100) / 100;
         requestAnimationFrame(() => {
-          newLayers.forEach(l => l.setOpacity(1));
+          newLayers.forEach(l => l.setOpacity(opacityValue));
           this.activeLayers.forEach(l => { if (!newLayers.includes(l)) this.map.removeLayer(l); });
           this.activeLayers = newLayers;
 
@@ -554,6 +1220,10 @@
 
         const nextIdx = (index + 1) % CONFIG.frames.length;
         this.preloadFrame(nextIdx);
+      }
+
+      setOpacity(opacity) {
+        this.activeLayers.forEach(layer => layer.setOpacity(opacity));
       }
     }
 
@@ -569,10 +1239,14 @@
         this.frames.forEach((f, i) => { const d = dates[i]; f.pct = max === min ? 0 : ((d - min) / (max - min)) * 100; });
 
         this.currentIndex = 0;
+        this.isPlaying = false;
+        this.playInterval = null;
+        this.playSpeed = 2000; // milliseconds
 
         this.ui = {
           prevBtn: document.getElementById('prevBtn'),
           nextBtn: document.getElementById('nextBtn'),
+          playBtn: document.getElementById('playBtn'),
           progress: document.getElementById('progress'),
           handle: document.getElementById('handle'),
           track: document.getElementById('trackWrapper'),
@@ -582,12 +1256,198 @@
         };
 
         this.initUI();
+        this.initControls();
         this.update(0);
 
         window.addEventListener('keydown', (e) => {
+          if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+          
           if (e.key === 'ArrowRight') this.step(1);
           if (e.key === 'ArrowLeft') this.step(-1);
+          if (e.key === ' ') {
+            e.preventDefault();
+            this.togglePlay();
+          }
+          if (e.key === 'f' || e.key === 'F') {
+            e.preventDefault();
+            Utils.toggleFullscreen();
+          }
+          if (e.key === 's' || e.key === 'S') {
+            e.preventDefault();
+            const sharePanel = document.getElementById('sharePanel');
+            const wasVisible = sharePanel.classList.contains('visible');
+            this.hideAllPanels();
+            if (!wasVisible) {
+              this.updateShareUrl();
+              sharePanel.classList.add('visible');
+            }
+          }
+          if (e.key === '?') {
+            e.preventDefault();
+            document.getElementById('shortcutsOverlay').classList.add('visible');
+          }
+          if (e.key === 'Escape') {
+            document.getElementById('shortcutsOverlay').classList.remove('visible');
+            this.hideAllPanels();
+          }
         });
+      }
+
+      initControls() {
+        // Chart info visibility
+        setTimeout(() => {
+          document.getElementById('chartInfo').classList.add('visible');
+          setTimeout(() => {
+            document.getElementById('chartInfo').classList.remove('visible');
+          }, 5000);
+        }, 1000);
+
+        // Help button
+        document.getElementById('helpBtn')?.addEventListener('click', () => {
+          document.getElementById('shortcutsOverlay').classList.add('visible');
+          this.hideAllPanels(['shortcutsOverlay']);
+        });
+
+        document.getElementById('closeShortcuts')?.addEventListener('click', () => {
+          document.getElementById('shortcutsOverlay').classList.remove('visible');
+        });
+
+        document.getElementById('shortcutsOverlay')?.addEventListener('click', (e) => {
+          if (e.target.id === 'shortcutsOverlay') {
+            document.getElementById('shortcutsOverlay').classList.remove('visible');
+          }
+        });
+
+        // Fullscreen button
+        document.getElementById('fullscreenBtn')?.addEventListener('click', () => {
+          Utils.toggleFullscreen();
+        });
+
+        // Opacity control
+        const opacityBtn = document.getElementById('opacityBtn');
+        const opacityControl = document.getElementById('opacityControl');
+        const opacitySlider = document.getElementById('opacitySlider');
+        const opacityValue = document.getElementById('opacityValue');
+
+        opacityBtn?.addEventListener('click', () => {
+          const wasVisible = opacityControl.classList.contains('visible');
+          this.hideAllPanels();
+          if (!wasVisible) opacityControl.classList.add('visible');
+        });
+
+        opacitySlider?.addEventListener('input', (e) => {
+          const value = e.target.value;
+          opacityValue.textContent = value;
+          this.mapCtrl.setOpacity(value / 100);
+        });
+
+        // Share button
+        const shareBtn = document.getElementById('shareBtn');
+        const sharePanel = document.getElementById('sharePanel');
+        const shareUrl = document.getElementById('shareUrl');
+        const copyBtn = document.getElementById('copyBtn');
+
+        shareBtn?.addEventListener('click', () => {
+          const wasVisible = sharePanel.classList.contains('visible');
+          this.hideAllPanels();
+          if (!wasVisible) {
+            this.updateShareUrl();
+            sharePanel.classList.add('visible');
+          }
+        });
+
+        copyBtn?.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(shareUrl.value);
+            copyBtn.textContent = '✓ Copied';
+            copyBtn.classList.add('copied');
+            setTimeout(() => {
+              copyBtn.textContent = 'Copy';
+              copyBtn.classList.remove('copied');
+            }, 2000);
+          } catch (err) {
+            // Fallback for browsers without clipboard API support
+            try {
+              shareUrl.select();
+              shareUrl.setSelectionRange(0, 99999); // For mobile devices
+              const success = document.execCommand('copy');
+              if (success) {
+                copyBtn.textContent = '✓ Copied';
+                copyBtn.classList.add('copied');
+                setTimeout(() => {
+                  copyBtn.textContent = 'Copy';
+                  copyBtn.classList.remove('copied');
+                }, 2000);
+              } else {
+                Utils.toast('Please manually copy the URL');
+              }
+            } catch (fallbackErr) {
+              Utils.toast('Please manually copy the URL');
+            }
+          }
+        });
+
+        // Play button
+        this.ui.playBtn?.addEventListener('click', () => {
+          this.togglePlay();
+        });
+
+        // Speed control buttons
+        document.querySelectorAll('.speed-btn').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const speed = parseInt(e.target.dataset.speed);
+            this.playSpeed = speed;
+            
+            // Update active state
+            document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            
+            // If currently playing, restart with new speed
+            if (this.isPlaying) {
+              clearInterval(this.playInterval);
+              this.playInterval = setInterval(() => {
+                this.step(1);
+              }, this.playSpeed);
+            }
+          });
+        });
+      }
+
+      hideAllPanels(except = []) {
+        const panels = ['opacityControl', 'sharePanel'];
+        panels.forEach(id => {
+          if (!except.includes(id)) {
+            document.getElementById(id)?.classList.remove('visible');
+          }
+        });
+      }
+
+      updateShareUrl() {
+        const frame = this.frames[this.currentIndex];
+        const center = this.mapCtrl.map.getCenter();
+        const zoom = this.mapCtrl.map.getZoom();
+        const url = `${window.location.origin}${window.location.pathname}?date=${frame.date}&lat=${center.lat.toFixed(4)}&lng=${center.lng.toFixed(4)}&zoom=${zoom}`;
+        document.getElementById('shareUrl').value = url;
+      }
+
+      togglePlay() {
+        this.isPlaying = !this.isPlaying;
+        const playBtn = this.ui.playBtn;
+        
+        if (this.isPlaying) {
+          playBtn.textContent = '⏸';
+          playBtn.title = 'Pause (Space)';
+          this.playInterval = setInterval(() => {
+            this.step(1);
+          }, this.playSpeed);
+        } else {
+          playBtn.textContent = '▶';
+          playBtn.title = 'Play (Space)';
+          if (this.playInterval) {
+            clearInterval(this.playInterval);
+            this.playInterval = null;
+          }
+        }
       }
 
       initUI() {
@@ -608,11 +1468,29 @@
           }
         });
 
-        // ticks
-        this.frames.forEach((f) => {
+        // ticks with year labels
+        const years = new Set();
+        this.frames.forEach((f, i) => {
           const tick = document.createElement('div');
           tick.className = 'tick';
           tick.style.left = `${f.pct}%`;
+          
+          // Extract year from date
+          const year = f.date.split('-')[0];
+          
+          // Mark as major tick if it's a new year or every 5th year
+          if (!years.has(year)) {
+            years.add(year);
+            const yearNum = parseInt(year);
+            if (yearNum % 5 === 0 || i === 0 || i === this.frames.length - 1) {
+              tick.classList.add('major');
+              const label = document.createElement('div');
+              label.className = 'tick-label';
+              label.textContent = year;
+              tick.appendChild(label);
+            }
+          }
+          
           this.ui.ticks.appendChild(tick);
         });
 
@@ -687,7 +1565,32 @@
       }
 
       const mapCtrl = new MapController('map');
-      new TimelineApp(mapCtrl);
+      const timelineApp = new TimelineApp(mapCtrl);
+
+      // Handle URL parameters for shared links
+      const urlParams = new URLSearchParams(window.location.search);
+      const dateParam = urlParams.get('date');
+      const latParam = urlParams.get('lat');
+      const lngParam = urlParams.get('lng');
+      const zoomParam = urlParams.get('zoom');
+
+      // Set map position from URL if available
+      if (latParam && lngParam && zoomParam) {
+        const lat = parseFloat(latParam);
+        const lng = parseFloat(lngParam);
+        const zoom = parseInt(zoomParam);
+        if (!isNaN(lat) && !isNaN(lng) && !isNaN(zoom)) {
+          mapCtrl.map.setView([lat, lng], zoom);
+        }
+      }
+
+      // Set timeframe from URL if available
+      if (dateParam) {
+        const frameIndex = CONFIG.frames.findIndex(f => f.date === dateParam);
+        if (frameIndex >= 0) {
+          timelineApp.update(frameIndex);
+        }
+      }
     }
 
     document.addEventListener('DOMContentLoaded', initApp);
