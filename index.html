@@ -260,7 +260,7 @@
     .timeline-track-wrapper {
       flex: 1;
       position: relative;
-      height: 40px;
+      height: 50px;
       display: flex;
       align-items: center;
       cursor: pointer;
@@ -301,6 +301,23 @@
       width: 3px;
       opacity: 1;
       box-shadow: 0 0 12px var(--primary);
+    }
+
+    .tick.major {
+      height: 16px;
+      background: rgba(255, 255, 255, 0.6);
+    }
+
+    .tick-label {
+      position: absolute;
+      bottom: -24px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      pointer-events: none;
+      font-weight: 600;
     }
 
     /* Slider Handle */
@@ -545,6 +562,92 @@
       box-shadow: 0 4px 12px rgba(30, 144, 255, 0.4);
     }
 
+    /* Share Panel */
+    .share-panel {
+      position: absolute;
+      top: 160px;
+      right: 24px;
+      background: var(--bg-glass);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      z-index: 900;
+      min-width: 280px;
+      display: none;
+    }
+
+    .share-panel.visible {
+      display: block;
+    }
+
+    .share-panel h4 {
+      margin: 0 0 12px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-light);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .share-url-box {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .share-url {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 10px;
+      color: var(--text-light);
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+      outline: none;
+      user-select: all;
+    }
+
+    .share-url:focus {
+      border-color: var(--primary);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .copy-btn {
+      padding: 10px 16px;
+      background: var(--primary);
+      border: none;
+      border-radius: 8px;
+      color: white;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s var(--transition-smooth);
+      white-space: nowrap;
+    }
+
+    .copy-btn:hover {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+
+    .copy-btn:active {
+      transform: translateY(0);
+    }
+
+    .copy-btn.copied {
+      background: var(--secondary);
+    }
+
+    .share-info {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-align: center;
+      margin-top: 8px;
+    }
+
     /* Opacity Control */
     .opacity-control {
       position: absolute;
@@ -640,7 +743,8 @@
         max-width: none;
       }
 
-      .opacity-control {
+      .opacity-control,
+      .share-panel {
         top: auto;
         bottom: 140px;
         right: 16px;
@@ -681,7 +785,7 @@
         flex-basis: 100%;
         width: 100%;
         margin-top: 10px;
-        height: 44px;
+        height: 50px;
       }
 
       .loader {
@@ -701,6 +805,10 @@
 
       .shortcuts-content h2 {
         font-size: 20px;
+      }
+
+      .tick-label {
+        display: none;
       }
     }
 
@@ -729,6 +837,7 @@
       <span class="site-tagline">Historical Aviation Charts</span>
     </div>
     <div class="header-actions">
+      <button class="icon-btn" id="shareBtn" title="Share (S)">🔗</button>
       <button class="icon-btn" id="opacityBtn" title="Adjust Opacity">◐</button>
       <button class="icon-btn" id="fullscreenBtn" title="Fullscreen (F)">⛶</button>
       <button class="icon-btn" id="helpBtn" title="Keyboard Shortcuts (?)">?</button>
@@ -753,6 +862,16 @@
     <div class="opacity-value"><span id="opacityValue">100</span>%</div>
   </div>
 
+  <!-- Share Panel -->
+  <div class="share-panel" id="sharePanel">
+    <h4>Share This View</h4>
+    <div class="share-url-box">
+      <input type="text" class="share-url" id="shareUrl" readonly>
+      <button class="copy-btn" id="copyBtn">Copy</button>
+    </div>
+    <div class="share-info">Share your current timeframe and map position</div>
+  </div>
+
   <!-- Keyboard Shortcuts Overlay -->
   <div class="shortcuts-overlay" id="shortcutsOverlay">
     <div class="shortcuts-content">
@@ -772,6 +891,10 @@
       <div class="shortcut-item">
         <span class="shortcut-desc">Toggle fullscreen</span>
         <span class="shortcut-key">F</span>
+      </div>
+      <div class="shortcut-item">
+        <span class="shortcut-desc">Share current view</span>
+        <span class="shortcut-key">S</span>
       </div>
       <div class="shortcut-item">
         <span class="shortcut-desc">Show this help</span>
@@ -1066,13 +1189,23 @@
             e.preventDefault();
             Utils.toggleFullscreen();
           }
+          if (e.key === 's' || e.key === 'S') {
+            e.preventDefault();
+            const sharePanel = document.getElementById('sharePanel');
+            const wasVisible = sharePanel.classList.contains('visible');
+            this.hideAllPanels();
+            if (!wasVisible) {
+              this.updateShareUrl();
+              sharePanel.classList.add('visible');
+            }
+          }
           if (e.key === '?') {
             e.preventDefault();
             document.getElementById('shortcutsOverlay').classList.add('visible');
           }
           if (e.key === 'Escape') {
             document.getElementById('shortcutsOverlay').classList.remove('visible');
-            document.getElementById('opacityControl').classList.remove('visible');
+            this.hideAllPanels();
           }
         });
       }
@@ -1089,6 +1222,7 @@
         // Help button
         document.getElementById('helpBtn')?.addEventListener('click', () => {
           document.getElementById('shortcutsOverlay').classList.add('visible');
+          this.hideAllPanels(['shortcutsOverlay']);
         });
 
         document.getElementById('closeShortcuts')?.addEventListener('click', () => {
@@ -1113,7 +1247,9 @@
         const opacityValue = document.getElementById('opacityValue');
 
         opacityBtn?.addEventListener('click', () => {
-          opacityControl.classList.toggle('visible');
+          const wasVisible = opacityControl.classList.contains('visible');
+          this.hideAllPanels();
+          if (!wasVisible) opacityControl.classList.add('visible');
         });
 
         opacitySlider?.addEventListener('input', (e) => {
@@ -1122,10 +1258,58 @@
           this.mapCtrl.setOpacity(value / 100);
         });
 
+        // Share button
+        const shareBtn = document.getElementById('shareBtn');
+        const sharePanel = document.getElementById('sharePanel');
+        const shareUrl = document.getElementById('shareUrl');
+        const copyBtn = document.getElementById('copyBtn');
+
+        shareBtn?.addEventListener('click', () => {
+          const wasVisible = sharePanel.classList.contains('visible');
+          this.hideAllPanels();
+          if (!wasVisible) {
+            this.updateShareUrl();
+            sharePanel.classList.add('visible');
+          }
+        });
+
+        copyBtn?.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(shareUrl.value);
+            copyBtn.textContent = '✓ Copied';
+            copyBtn.classList.add('copied');
+            setTimeout(() => {
+              copyBtn.textContent = 'Copy';
+              copyBtn.classList.remove('copied');
+            }, 2000);
+          } catch (err) {
+            shareUrl.select();
+            document.execCommand('copy');
+            Utils.toast('URL copied to clipboard');
+          }
+        });
+
         // Play button
         this.ui.playBtn?.addEventListener('click', () => {
           this.togglePlay();
         });
+      }
+
+      hideAllPanels(except = []) {
+        const panels = ['opacityControl', 'sharePanel'];
+        panels.forEach(id => {
+          if (!except.includes(id)) {
+            document.getElementById(id)?.classList.remove('visible');
+          }
+        });
+      }
+
+      updateShareUrl() {
+        const frame = this.frames[this.currentIndex];
+        const center = this.mapCtrl.map.getCenter();
+        const zoom = this.mapCtrl.map.getZoom();
+        const url = `${window.location.origin}${window.location.pathname}?date=${frame.date}&lat=${center.lat.toFixed(4)}&lng=${center.lng.toFixed(4)}&zoom=${zoom}`;
+        document.getElementById('shareUrl').value = url;
       }
 
       togglePlay() {
@@ -1166,11 +1350,29 @@
           }
         });
 
-        // ticks
-        this.frames.forEach((f) => {
+        // ticks with year labels
+        const years = new Set();
+        this.frames.forEach((f, i) => {
           const tick = document.createElement('div');
           tick.className = 'tick';
           tick.style.left = `${f.pct}%`;
+          
+          // Extract year from date
+          const year = f.date.split('-')[0];
+          
+          // Mark as major tick if it's a new year or every 5th year
+          if (!years.has(year)) {
+            years.add(year);
+            const yearNum = parseInt(year);
+            if (yearNum % 5 === 0 || i === 0 || i === this.frames.length - 1) {
+              tick.classList.add('major');
+              const label = document.createElement('div');
+              label.className = 'tick-label';
+              label.textContent = year;
+              tick.appendChild(label);
+            }
+          }
+          
           this.ui.ticks.appendChild(tick);
         });
 
@@ -1245,7 +1447,32 @@
       }
 
       const mapCtrl = new MapController('map');
-      new TimelineApp(mapCtrl);
+      const timelineApp = new TimelineApp(mapCtrl);
+
+      // Handle URL parameters for shared links
+      const urlParams = new URLSearchParams(window.location.search);
+      const dateParam = urlParams.get('date');
+      const latParam = urlParams.get('lat');
+      const lngParam = urlParams.get('lng');
+      const zoomParam = urlParams.get('zoom');
+
+      // Set map position from URL if available
+      if (latParam && lngParam && zoomParam) {
+        const lat = parseFloat(latParam);
+        const lng = parseFloat(lngParam);
+        const zoom = parseInt(zoomParam);
+        if (!isNaN(lat) && !isNaN(lng) && !isNaN(zoom)) {
+          mapCtrl.map.setView([lat, lng], zoom);
+        }
+      }
+
+      // Set timeframe from URL if available
+      if (dateParam) {
+        const frameIndex = CONFIG.frames.findIndex(f => f.date === dateParam);
+        if (frameIndex >= 0) {
+          timelineApp.update(frameIndex);
+        }
+      }
     }
 
     document.addEventListener('DOMContentLoaded', initApp);
