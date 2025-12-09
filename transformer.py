@@ -32,9 +32,11 @@ import os
 import math
 import logging
 import json
+import shlex
 from typing import Optional, Tuple, List, Dict, Any
 from pathlib import Path
 from datetime import datetime
+from collections import deque
 
 # Configure logging
 logging.basicConfig(
@@ -44,10 +46,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- IMAGE SAFETY CONFIGURATION ---
-# Set a reasonable limit for large GeoTIFF files (500 megapixels)
-# This prevents decompression bomb attacks while allowing legitimate large images
-Image.MAX_IMAGE_PIXELS = 500_000_000
-logger.info("Image size limit set to 500 megapixels for GeoTIFF support")
+# Set a reasonable limit for large GeoTIFF files (100 megapixels)
+# This prevents decompression bomb attacks while allowing legitimate aerial imagery
+# For context: a 10000x10000 image is 100MP, which is reasonable for most GeoTIFF work
+Image.MAX_IMAGE_PIXELS = 100_000_000
+logger.info("Image size limit set to 100 megapixels for security")
 # -----------------------------
 
 # --- CONSTANTS ---
@@ -266,10 +269,9 @@ class SmartAlignApp:
         self.drag_start_y: int = 0
         self.is_aligning: bool = False
         
-        # Undo/Redo stacks
-        self.undo_stack: List[Dict[str, float]] = []
-        self.redo_stack: List[Dict[str, float]] = []
-        self.max_undo_steps: int = 50
+        # Undo/Redo stacks - using deque for O(1) operations
+        self.undo_stack: deque = deque(maxlen=50)
+        self.redo_stack: deque = deque(maxlen=50)
 
         self._setup_ui()
         logger.info("SmartAlignApp initialized successfully")
@@ -410,9 +412,7 @@ class SmartAlignApp:
             'view_pan_y': self.view_pan_y,
             'scale': self.scale
         }
-        self.undo_stack.append(state)
-        if len(self.undo_stack) > self.max_undo_steps:
-            self.undo_stack.pop(0)
+        self.undo_stack.append(state)  # O(1) with deque
         self.redo_stack.clear()  # Clear redo stack on new action
         logger.debug(f"State saved (undo stack: {len(self.undo_stack)})")
     
@@ -652,12 +652,34 @@ class SmartAlignApp:
             with open(self.session_file, 'r') as f:
                 session_data = json.load(f)
             
+            # Validate session data structure
+            if not isinstance(session_data, dict):
+                logger.warning("Invalid session data structure")
+                return False
+            
+            required_keys = ['files', 'current_index', 'timestamp']
+            if not all(key in session_data for key in required_keys):
+                logger.warning("Session data missing required keys")
+                return False
+            
+            # Validate data types
+            if not isinstance(session_data['files'], list):
+                logger.warning("Invalid files list in session data")
+                return False
+            
+            if not isinstance(session_data['current_index'], int):
+                logger.warning("Invalid current_index in session data")
+                return False
+            
             # Verify session is for current files
             if session_data.get('files') != self.image_files:
                 logger.info("Session files don't match, starting fresh")
                 return False
             
-            self.current_index = session_data.get('current_index', 0)
+            # Sanitize current_index
+            current_index = max(0, min(session_data['current_index'], len(self.image_files) - 1))
+            self.current_index = current_index
+            
             logger.info(f"Session loaded: resuming at image {self.current_index + 1}")
             
             # Ask user if they want to resume
@@ -672,12 +694,15 @@ class SmartAlignApp:
             
             return True
             
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.error(f"Error loading session (corrupted file): {e}")
+            return False
         except Exception as e:
             logger.error(f"Error loading session: {e}", exc_info=True)
             return False
     
     def _save_session(self):
-        """Save current session state."""
+        """Save current session state using atomic write."""
         if not self.session_file or not self.folder_path:
             return
         
@@ -688,10 +713,25 @@ class SmartAlignApp:
                 'timestamp': datetime.now().isoformat()
             }
             
-            with open(self.session_file, 'w') as f:
-                json.dump(session_data, f, indent=2)
+            # Use atomic write: write to temp file, then rename
+            temp_file = self.session_file + '.tmp'
             
-            logger.debug("Session saved")
+            try:
+                with open(temp_file, 'w') as f:
+                    json.dump(session_data, f, indent=2)
+                
+                # Atomic rename (on POSIX systems)
+                os.replace(temp_file, self.session_file)
+                logger.debug("Session saved")
+                
+            except (OSError, IOError) as e:
+                logger.error(f"Error writing session file: {e}")
+                # Clean up temp file if it exists
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
             
         except Exception as e:
             logger.error(f"Error saving session: {e}", exc_info=True)
@@ -1125,13 +1165,17 @@ class SmartAlignApp:
             
             filename = os.path.basename(self.current_image_path)
             
-            # Build gdal_translate command
+            # Properly escape filename for shell command to prevent injection
+            escaped_filename = shlex.quote(filename)
+            escaped_output = shlex.quote(f"aligned/{filename}")
+            
+            # Build gdal_translate command with properly escaped filenames
             cmd = (
                 f"gdal_translate "
                 f"-a_ullr {final_ul_x:.3f} {final_ul_y:.3f} "
                 f"{final_lr_x:.3f} {final_lr_y:.3f} "
                 f"-a_srs '{self.PROJ_STRING}' "
-                f'"{filename}" "aligned/{filename}"'
+                f"{escaped_filename} {escaped_output}"
             )
             
             # Write to script
