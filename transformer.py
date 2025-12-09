@@ -186,9 +186,9 @@ class LCCProjection:
         y = self.rho0 - rho * math.cos(theta)
         return x, y
 
-    # Keep legacy method names for backward compatibility
-    calc_m = _calc_m
-    calc_t = _calc_t
+    # Keep legacy method names for backward compatibility (if needed by external tools)
+    # calc_m = _calc_m
+    # calc_t = _calc_t
 
 class SmartAlignApp:
     """
@@ -808,17 +808,16 @@ class SmartAlignApp:
         Args:
             factor: The scaling factor to apply (e.g., 1.005 for slight increase)
         """
-        # Save state for undo
-        self._save_state()
-        
         old_scale = self.img_scale
         new_scale = self.img_scale * factor
         
-        # Enforce scale limits
+        # Enforce scale limits - check before saving state
         if new_scale < Config.MIN_IMG_SCALE or new_scale > Config.MAX_IMG_SCALE:
             logger.debug(f"Scale limit reached: {new_scale:.3f}")
-            self.undo_stack.pop()  # Remove the state we just saved
             return
+        
+        # Save state for undo only after validating the change
+        self._save_state()
         
         # Adjust align_x/y so the visual center stays fixed relative to the screen
         # This prevents the image from shifting when scaling
@@ -935,7 +934,7 @@ class SmartAlignApp:
             if disp_w > 1 and disp_h > 1:
                 resized = self.original_img.resize(
                     (disp_w, disp_h),
-                    Image.Resampling.NEAREST
+                    Config.IMAGE_RESIZE_QUALITY
                 )
                 self.tk_img = ImageTk.PhotoImage(resized)
                 self.canvas.create_image(img_x, img_y, anchor=tk.NW, image=self.tk_img)
@@ -943,8 +942,44 @@ class SmartAlignApp:
             # 2. Draw Grid
             self._draw_grid()
             
+            # 3. Draw Alignment Info
+            self._draw_alignment_info()
+            
         except Exception as e:
             logger.error(f"Error redrawing canvas: {e}", exc_info=True)
+    
+    def _draw_alignment_info(self):
+        """Draw alignment information overlay."""
+        cw = self.canvas.winfo_width()
+        
+        # Calculate shift in meters
+        shift_m_x = (self.align_x / self.scale) * self.base_pixel_w
+        shift_m_y = (self.align_y / self.scale) * abs(self.base_pixel_h)
+        
+        info_text = (
+            f"Scale: {self.img_scale:.4f}x  |  "
+            f"Shift: ({shift_m_x:.1f}m, {shift_m_y:.1f}m)  |  "
+            f"View Zoom: {self.scale:.4f}x"
+        )
+        
+        # Draw semi-transparent background
+        text_bg = self.canvas.create_rectangle(
+            cw - 420, 5, cw - 5, 30,
+            fill="#000000",
+            outline="#555555",
+            stipple="gray50",
+            tags="info"
+        )
+        
+        # Draw info text
+        self.canvas.create_text(
+            cw - 10, 17,
+            text=info_text,
+            fill="#00ff00",
+            font=("Courier", 9, "bold"),
+            anchor="e",
+            tags="info"
+        )
     
     def _draw_grid(self):
         """Draw the geographic grid overlay with lat/lon lines."""
