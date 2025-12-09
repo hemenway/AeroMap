@@ -219,7 +219,10 @@ class SmartAlignApp:
         self.root.geometry(f"{Config.WINDOW_WIDTH}x{Config.WINDOW_HEIGHT}")
 
         self.lcc = LCCProjection()
+        self._init_projection_constants()
 
+    def _init_projection_constants(self):
+        """Initialize or re-initialize projection constants based on Config."""
         # Projection String for GDAL
         self.PROJ_STRING = (
             "+proj=lcc "
@@ -299,6 +302,13 @@ class SmartAlignApp:
             control_frame,
             text="2. Save & Next (Enter)",
             command=self.save_and_next,
+            **btn_style
+        ).pack(side=tk.LEFT, padx=10, pady=10)
+        
+        tk.Button(
+            control_frame,
+            text="Settings",
+            command=self.open_settings,
             **btn_style
         ).pack(side=tk.LEFT, padx=10, pady=10)
         
@@ -1216,6 +1226,116 @@ class SmartAlignApp:
         except Exception as e:
             logger.error(f"Error saving alignment: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to save alignment: {str(e)}")
+
+    def open_settings(self):
+        """Open the settings dialog."""
+        SettingsDialog(self.root, self)
+
+    def reinitialize_projection(self):
+        """Re-initialize projection after settings change."""
+        self.lcc = LCCProjection()
+        self._init_projection_constants()
+        self.redraw()
+        logger.info("Projection re-initialized with new settings")
+
+
+class SettingsDialog:
+    """Dialog for editing configuration parameters."""
+    
+    def __init__(self, parent, app):
+        self.parent = parent
+        self.app = app
+        self.window = tk.Toplevel(parent)
+        self.window.title("Settings")
+        self.window.geometry("400x500")
+        self.window.configure(bg="#2b2b2b")
+        
+        self.entries = {}
+        
+        # Parameters to edit
+        self.params = [
+            ("Latitude 1", "LAT_1", float),
+            ("Latitude 2", "LAT_2", float),
+            ("Latitude Origin", "LAT_0", float),
+            ("Longitude Origin", "LON_0", float),
+            ("Base Pixel Width", "BASE_PIXEL_WIDTH", float),
+            ("Base Pixel Height", "BASE_PIXEL_HEIGHT", float),
+            ("Default UL X", "DEFAULT_UL_X", float),
+            ("Default UL Y", "DEFAULT_UL_Y", float),
+        ]
+        
+        self._setup_ui()
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+    def _setup_ui(self):
+        main_frame = tk.Frame(self.window, bg="#2b2b2b", padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(
+            main_frame,
+            text="Projection Parameters",
+            font=("Arial", 14, "bold"),
+            bg="#2b2b2b",
+            fg="white"
+        ).pack(pady=(0, 20))
+        
+        for label_text, config_key, _ in self.params:
+            frame = tk.Frame(main_frame, bg="#2b2b2b")
+            frame.pack(fill=tk.X, pady=5)
+            
+            tk.Label(
+                frame,
+                text=label_text,
+                width=20,
+                anchor="w",
+                bg="#2b2b2b",
+                fg="#ccc"
+            ).pack(side=tk.LEFT)
+            
+            entry = tk.Entry(frame, bg="#404040", fg="white", insertbackground="white")
+            entry.insert(0, str(getattr(Config, config_key)))
+            entry.pack(side=tk.RIGHT, expand=True, fill=tk.X)
+            self.entries[config_key] = entry
+            
+        btn_frame = tk.Frame(main_frame, bg="#2b2b2b")
+        btn_frame.pack(pady=20, fill=tk.X)
+        
+        tk.Button(
+            btn_frame,
+            text="Save",
+            command=self.save,
+            bg="#4CAF50",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            relief="flat",
+            padx=20
+        ).pack(side=tk.RIGHT, padx=5)
+        
+        tk.Button(
+            btn_frame,
+            text="Cancel",
+            command=self.window.destroy,
+            bg="#555",
+            fg="white",
+            font=("Arial", 10),
+            relief="flat",
+            padx=20
+        ).pack(side=tk.RIGHT, padx=5)
+        
+    def save(self):
+        try:
+            for _, config_key, type_func in self.params:
+                value_str = self.entries[config_key].get()
+                value = type_func(value_str)
+                setattr(Config, config_key, value)
+            
+            self.app.reinitialize_projection()
+            messagebox.showinfo("Success", "Settings updated successfully")
+            self.window.destroy()
+            
+        except ValueError as e:
+            messagebox.showerror("Error", "Invalid input. Please check your values.")
 
 def main():
     """Main entry point for the application."""
