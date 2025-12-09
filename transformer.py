@@ -767,10 +767,10 @@ class SmartAlignApp:
             self.orig_w, self.orig_h = self.original_img.size
             logger.info(f"Image size: {self.orig_w}x{self.orig_h}")
             
-            # Reset Alignment & Scale
-            self.align_x = 0
-            self.align_y = 0
-            self.img_scale = 1.0
+            # Reset Alignment & Scale - REMOVED for persistence
+            # self.align_x = 0
+            # self.align_y = 0
+            # self.img_scale = 1.0
 
             # Calculate initial scale to fit image in viewport
             self.root.update()
@@ -833,8 +833,9 @@ class SmartAlignApp:
         dy = event.y - self.drag_start_y
         
         if self.is_aligning:
-            self.align_x += dx
-            self.align_y += dy
+            # Make alignment scale-independent
+            self.align_x += dx / self.scale
+            self.align_y += dy / self.scale
         else:
             self.view_pan_x += dx
             self.view_pan_y += dy
@@ -851,8 +852,9 @@ class SmartAlignApp:
             dx: Change in x direction (pixels)
             dy: Change in y direction (pixels)
         """
-        self.align_x += dx
-        self.align_y += dy
+        # Nudge in screen pixels, converted to scale-independent units
+        self.align_x += dx / self.scale
+        self.align_y += dy / self.scale
         self.redraw()
         logger.debug(f"Nudged by ({dx}, {dy})")
 
@@ -883,8 +885,9 @@ class SmartAlignApp:
         delta_h = h_factor * (new_scale - old_scale)
         
         # Shift top-left position to keep center fixed
-        self.align_x -= delta_w / 2
-        self.align_y -= delta_h / 2
+        # Adjustments must be scale-independent
+        self.align_x -= (delta_w / 2) / self.scale
+        self.align_y -= (delta_h / 2) / self.scale
         
         self.img_scale = new_scale
         self.redraw()
@@ -983,8 +986,8 @@ class SmartAlignApp:
             disp_w = int(self.orig_w * self.scale * self.img_scale)
             disp_h = int(self.orig_h * self.scale * self.img_scale)
             
-            img_x = self.view_pan_x + self.align_x
-            img_y = self.view_pan_y + self.align_y
+            img_x = self.view_pan_x + (self.align_x * self.scale)
+            img_y = self.view_pan_y + (self.align_y * self.scale)
             
             if disp_w > 1 and disp_h > 1:
                 resized = self.original_img.resize(
@@ -1007,9 +1010,9 @@ class SmartAlignApp:
         """Draw alignment information overlay."""
         cw = self.canvas.winfo_width()
         
-        # Calculate shift in meters
-        shift_m_x = (self.align_x / self.scale) * self.base_pixel_w
-        shift_m_y = (self.align_y / self.scale) * abs(self.base_pixel_h)
+        # Calculate shift in meters (align_x/y are now scale-independent pixels)
+        shift_m_x = self.align_x * self.base_pixel_w
+        shift_m_y = self.align_y * abs(self.base_pixel_h)
         
         info_text = (
             f"Scale: {self.img_scale:.4f}x  |  "
@@ -1155,9 +1158,9 @@ class SmartAlignApp:
         
         try:
             # Convert pixel shifts to meter shifts
-            # Visual shift / view scale * base pixel size = meter shift
-            shift_meters_x = (self.align_x / self.scale) * self.base_pixel_w
-            shift_meters_y = (self.align_y / self.scale) * abs(self.base_pixel_h)
+            # align_x/y are scale-independent, so just multiply by base pixel size
+            shift_meters_x = self.align_x * self.base_pixel_w
+            shift_meters_y = self.align_y * abs(self.base_pixel_h)
             
             # Calculate final upper-left corner in meters
             final_ul_x = self.default_ul_x - shift_meters_x
