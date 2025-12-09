@@ -43,10 +43,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- DISABLE SAFETY LIMITS ---
-# This allows loading very large GeoTIFF files
-Image.MAX_IMAGE_PIXELS = None
-logger.info("Image size limits disabled for large GeoTIFF support")
+# --- IMAGE SAFETY CONFIGURATION ---
+# Set a reasonable limit for large GeoTIFF files (500 megapixels)
+# This prevents decompression bomb attacks while allowing legitimate large images
+Image.MAX_IMAGE_PIXELS = 500_000_000
+logger.info("Image size limit set to 500 megapixels for GeoTIFF support")
 # -----------------------------
 
 # --- CONSTANTS ---
@@ -100,6 +101,15 @@ class Config:
     # Performance
     IMAGE_RESIZE_QUALITY = Image.Resampling.NEAREST  # Fast for interactive use
     CANVAS_UPDATE_DELAY = 10  # milliseconds
+    
+    # UI Overlay constants
+    INFO_OVERLAY_WIDTH = 420
+    INFO_OVERLAY_PADDING = 5
+    INFO_OVERLAY_HEIGHT = 30
+    
+    # Grid label positioning
+    LON_LABEL_LAT = 38  # Latitude for longitude labels
+    LAT_LABEL_LON = -104  # Longitude for latitude labels
 
 
 # --- LCC MATH CLASS ---
@@ -186,9 +196,6 @@ class LCCProjection:
         y = self.rho0 - rho * math.cos(theta)
         return x, y
 
-    # Keep legacy method names for backward compatibility (if needed by external tools)
-    # calc_m = _calc_m
-    # calc_t = _calc_t
 
 class SmartAlignApp:
     """
@@ -964,7 +971,10 @@ class SmartAlignApp:
         
         # Draw semi-transparent background
         text_bg = self.canvas.create_rectangle(
-            cw - 420, 5, cw - 5, 30,
+            cw - Config.INFO_OVERLAY_WIDTH,
+            Config.INFO_OVERLAY_PADDING,
+            cw - Config.INFO_OVERLAY_PADDING,
+            Config.INFO_OVERLAY_HEIGHT,
             fill="#000000",
             outline="#555555",
             stipple="gray50",
@@ -1021,7 +1031,7 @@ class SmartAlignApp:
                     tags="grid"
                 )
                 # Add longitude label
-                mx, my = to_screen(38, lon)
+                mx, my = to_screen(Config.LON_LABEL_LAT, lon)
                 if 0 <= mx <= cw:
                     self.canvas.create_text(
                         mx, 20,
@@ -1052,7 +1062,7 @@ class SmartAlignApp:
                     tags="grid"
                 )
                 # Add latitude label
-                mx, my = to_screen(lat, -104)
+                mx, my = to_screen(lat, Config.LAT_LABEL_LON)
                 if 0 <= my <= ch:
                     self.canvas.create_text(
                         30, my,
