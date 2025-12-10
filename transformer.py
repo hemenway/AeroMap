@@ -640,8 +640,14 @@ class SmartAlignApp:
             
             if not session_loaded:
                 self.current_index = 0
-            
-            self.load_image()
+                
+                # New Workflow: Prompt for Projection and Corners
+                if self._run_setup_workflow():
+                    self.load_image()
+                else:
+                    logger.info("Setup workflow cancelled")
+            else:
+                self.load_image()
             
         except Exception as e:
             logger.error(f"Error loading folder: {e}", exc_info=True)
@@ -1293,7 +1299,7 @@ class SettingsDialog:
                 fg="#ccc"
             ).pack(side=tk.LEFT)
             
-            entry = tk.Entry(frame, bg="#404040", fg="white", insertbackground="white")
+            entry = tk.Entry(frame, bg="white", fg="black", insertbackground="black") # High contrast
             entry.insert(0, str(getattr(Config, config_key)))
             entry.pack(side=tk.RIGHT, expand=True, fill=tk.X)
             self.entries[config_key] = entry
@@ -1336,6 +1342,229 @@ class SettingsDialog:
             
         except ValueError as e:
             messagebox.showerror("Error", "Invalid input. Please check your values.")
+
+    def _run_setup_workflow(self) -> bool:
+        """
+        Run the initial setup workflow (Projection -> Corners).
+        
+        Returns:
+            True if completed successfully, False if cancelled.
+        """
+        # 1. Projection Setup
+        proj_dialog = ProjectionSetupDialog(self.root, self)
+        self.root.wait_window(proj_dialog.window)
+        if not proj_dialog.result:
+            return False
+            
+        # 2. Corners Setup
+        corners_dialog = CornersDialog(self.root, self)
+        self.root.wait_window(corners_dialog.window)
+        if not corners_dialog.result:
+            return False
+            
+        # 3. Calculate Geometry
+        try:
+            self._calculate_geometry(corners_dialog.result)
+            return True
+        except Exception as e:
+            logger.error(f"Geometry calculation failed: {e}")
+            messagebox.showerror("Error", f"Failed to calculate geometry: {e}")
+            return False
+
+    def _calculate_geometry(self, corners: Dict[str, Tuple[float, float]]):
+        """
+        Calculate UL and Pixel Size based on 4 corners.
+        
+        Args:
+            corners: Dict with keys 'nw', 'ne', 'se', 'sw', values are (lat, lon)
+        """
+        # Project all corners to LCC (meters)
+        nw_m = self.lcc.project(*corners['nw'])
+        ne_m = self.lcc.project(*corners['ne'])
+        se_m = self.lcc.project(*corners['se'])
+        sw_m = self.lcc.project(*corners['sw'])
+        
+        # Calculate bounds
+        min_x = min(nw_m[0], sw_m[0])
+        max_x = max(ne_m[0], se_m[0])
+        min_y = min(sw_m[1], se_m[1])
+        max_y = max(nw_m[1], ne_m[1])
+        
+        width_m = max_x - min_x
+        height_m = max_y - min_y
+        
+        # Get image size (of first image)
+        if not self.image_files:
+            raise ValueError("No images loaded")
+            
+        with Image.open(self.image_files[0]) as img:
+            img_w, img_h = img.size
+            
+        # Calculate pixel resolution
+        # Note: Height is negative in GeoTIFF convention (top-down)
+        pixel_w = width_m / img_w
+        pixel_h = -(height_m / img_h)
+        
+        # Update Config
+        Config.BASE_PIXEL_WIDTH = pixel_w
+        Config.BASE_PIXEL_HEIGHT = pixel_h
+        Config.DEFAULT_UL_X = min_x
+        Config.DEFAULT_UL_Y = max_y
+        
+        logger.info(f"Calculated Geometry:")
+        logger.info(f"  Pixel Size: {pixel_w:.4f}, {pixel_h:.4f}")
+        logger.info(f"  UL: {min_x:.3f}, {max_y:.3f}")
+        
+        # Re-init projection to pick up new constants
+        self.reinitialize_projection()
+
+
+class ProjectionSetupDialog:
+    """Dialog for setting up projection parameters."""
+    
+    def __init__(self, parent, app):
+        self.window = tk.Toplevel(parent)
+        self.window.title("Step 1: Projection Setup")
+        self.window.geometry("500x400")
+        self.window.configure(bg="#2b2b2b")
+        self.result = False
+        
+        self._setup_ui()
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+    def _setup_ui(self):
+        main = tk.Frame(self.window, bg="#2b2b2b", padx=20, pady=20)
+        main.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(
+            main, text="Enter Projection Parameters",
+            font=("Arial", 14, "bold"), bg="#2b2b2b", fg="white"
+        ).pack(pady=(0, 20))
+        
+        # Entries
+        self.entries = {}
+        fields = [
+            ("Latitude 1 (Standard Parallel)", "LAT_1"),
+            ("Latitude 2 (Standard Parallel)", "LAT_2"),
+            ("Longitude Origin (Central Meridian)", "LON_0")
+        ]
+        
+        for label, key in fields:
+            frame = tk.Frame(main, bg="#2b2b2b")
+            frame.pack(fill=tk.X, pady=5)
+            tk.Label(frame, text=label, width=30, anchor="w", bg="#2b2b2b", fg="#ccc").pack(side=tk.LEFT)
+            entry = tk.Entry(frame, bg="white", fg="black", insertbackground="black") # High contrast
+            entry.insert(0, str(getattr(Config, key)))
+            entry.pack(side=tk.RIGHT, expand=True, fill=tk.X)
+            self.entries[key] = entry
+            
+        # Auto-calculated Lat Origin
+        self.lat0_var = tk.StringVar(value=f"Lat Origin: {Config.LAT_0:.4f} (Auto)")
+        tk.Label(
+            main, textvariable=self.lat0_var,
+            font=("Arial", 10, "italic"), bg="#2b2b2b", fg="#888"
+        ).pack(pady=10)
+        
+        # Buttons
+        btn_frame = tk.Frame(main, bg="#2b2b2b")
+        btn_frame.pack(pady=20)
+        tk.Button(
+            btn_frame, text="Next >", command=self.save,
+            bg="#4CAF50", fg="white", font=("Arial", 11, "bold")
+        ).pack(side=tk.RIGHT, padx=5)
+        
+    def save(self):
+        try:
+            lat1 = float(self.entries["LAT_1"].get())
+            lat2 = float(self.entries["LAT_2"].get())
+            lon0 = float(self.entries["LON_0"].get())
+            
+            # Update Config
+            Config.LAT_1 = lat1
+            Config.LAT_2 = lat2
+            Config.LON_0 = lon0
+            Config.LAT_0 = (lat1 + lat2) / 2  # Auto-calculate midpoint
+            
+            self.result = True
+            self.window.destroy()
+        except ValueError:
+            messagebox.showerror("Error", "Invalid numeric input")
+
+
+class CornersDialog:
+    """Dialog for entering 4 corner coordinates."""
+    
+    def __init__(self, parent, app):
+        self.window = tk.Toplevel(parent)
+        self.window.title("Step 2: Corner Coordinates")
+        self.window.geometry("600x500")
+        self.window.configure(bg="#2b2b2b")
+        self.result = None
+        
+        self._setup_ui()
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+    def _setup_ui(self):
+        main = tk.Frame(self.window, bg="#2b2b2b", padx=20, pady=20)
+        main.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(
+            main, text="Enter 4 Corner Coordinates (Lat, Lon)",
+            font=("Arial", 14, "bold"), bg="#2b2b2b", fg="white"
+        ).pack(pady=(0, 10))
+        
+        tk.Label(
+            main, text="Format: Decimal Degrees (e.g., 34.5, -98.2)",
+            font=("Arial", 10), bg="#2b2b2b", fg="#aaa"
+        ).pack(pady=(0, 20))
+        
+        self.entries = {}
+        corners = [
+            ("North-West (Top-Left)", "nw"),
+            ("North-East (Top-Right)", "ne"),
+            ("South-East (Bottom-Right)", "se"),
+            ("South-West (Bottom-Left)", "sw"),
+        ]
+        
+        for label, key in corners:
+            frame = tk.Frame(main, bg="#2b2b2b")
+            frame.pack(fill=tk.X, pady=10)
+            tk.Label(frame, text=label, width=25, anchor="w", bg="#2b2b2b", fg="#ccc").pack(side=tk.LEFT)
+            
+            # Lat
+            tk.Label(frame, text="Lat:", bg="#2b2b2b", fg="#888").pack(side=tk.LEFT, padx=5)
+            lat_ent = tk.Entry(frame, width=15, bg="white", fg="black")
+            lat_ent.pack(side=tk.LEFT)
+            
+            # Lon
+            tk.Label(frame, text="Lon:", bg="#2b2b2b", fg="#888").pack(side=tk.LEFT, padx=5)
+            lon_ent = tk.Entry(frame, width=15, bg="white", fg="black")
+            lon_ent.pack(side=tk.LEFT)
+            
+            self.entries[key] = (lat_ent, lon_ent)
+            
+        # Buttons
+        btn_frame = tk.Frame(main, bg="#2b2b2b")
+        btn_frame.pack(pady=30)
+        tk.Button(
+            btn_frame, text="Finish Setup", command=self.save,
+            bg="#2196F3", fg="white", font=("Arial", 11, "bold")
+        ).pack(side=tk.RIGHT, padx=5)
+        
+    def save(self):
+        try:
+            res = {}
+            for key, (lat_ent, lon_ent) in self.entries.items():
+                lat = float(lat_ent.get())
+                lon = float(lon_ent.get())
+                res[key] = (lat, lon)
+            
+            self.result = res
+            self.window.destroy()
+        except ValueError:
+            messagebox.showerror("Error", "Invalid coordinates. Please enter numbers.")
 
 def main():
     """Main entry point for the application."""
