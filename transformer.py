@@ -1,1476 +1,209 @@
-"""
-GeoTIFF Aligner Application
-
-A sophisticated tool for aligning GeoTIFF images with Lambert Conformal Conic (LCC) projection.
-Provides interactive controls for translating, scaling, and aligning aerial maps.
-
-Keyboard Shortcuts:
-    View Navigation:
-        +/= : Zoom in
-        -/_ : Zoom out
-        Mouse Wheel : Zoom at cursor
-        Left Drag : Pan viewport
-    
-    Map Alignment:
-        Right Drag : Move map
-        Shift+Left Drag : Move map (Mac)
-        Arrow Keys : Nudge map position
-        [ : Scale down (fine)
-        ] : Scale up (fine)
-        Shift+[ : Scale down (coarse)
-        Shift+] : Scale up (coarse)
-    
-    File Operations:
-        Enter : Save and next image
-        Escape : Show help
-"""
-
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 import os
-import math
-import logging
-import json
-import shlex
-from typing import Optional, Tuple, List, Dict, Any
-from datetime import datetime
-from collections import deque
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# --- IMAGE SAFETY CONFIGURATION ---
-# Set a reasonable limit for large GeoTIFF files (100 megapixels)
-# This prevents decompression bomb attacks while allowing legitimate aerial imagery
-# For context: a 10000x10000 image is 100MP, which is reasonable for most GeoTIFF work
-Image.MAX_IMAGE_PIXELS = 100_000_000
-logger.info("Image size limit set to 100 megapixels for security")
+# --- DISABLE SAFETY LIMITS ---
+Image.MAX_IMAGE_PIXELS = None
 # -----------------------------
 
-# --- CONSTANTS ---
-class Config:
-    """Configuration constants for the application."""
-    
-    # GRS 1980 / NAD83 Ellipsoid Parameters
-    ELLIPSOID_A = 6378137.0  # Semi-major axis in meters
-    ELLIPSOID_F = 1 / 298.257222101  # Flattening
-    
-    # Lambert Conformal Conic Projection Parameters
-    LAT_1 = 38.6666666666667  # First standard parallel
-    LAT_2 = 33.3333333333333  # Second standard parallel
-    LAT_0 = 34.0  # Latitude of origin
-    LON_0 = -98.5  # Central meridian
-    
-    # Default base metadata (in meters)
-    BASE_PIXEL_WIDTH = 42.334928995476666
-    BASE_PIXEL_HEIGHT = -42.334316208518793
-    DEFAULT_UL_X = -424886.449
-    DEFAULT_UL_Y = 252841.780
-    
-    # UI Configuration
-    WINDOW_WIDTH = 1400
-    WINDOW_HEIGHT = 950
-    WINDOW_TITLE = "GeoTIFF Aligner v4 (Enhanced)"
-    
-    # View Configuration
-    DEFAULT_SCALE = 0.1
-    MIN_SCALE = 0.0001
-    MAX_SCALE = 50
-    ZOOM_FACTOR = 1.1
-    ZOOM_WHEEL_FACTOR = 0.9
-    
-    # Image Scale Configuration
-    MIN_IMG_SCALE = 0.1
-    MAX_IMG_SCALE = 10.0
-    SCALE_FACTOR_FINE = 0.995
-    SCALE_FACTOR_COARSE = 0.95
-    
-    # Grid Configuration
-    LAT_MIN, LAT_MAX = 30, 40
-    LON_MIN, LON_MAX = -105, -92
-    GRID_SEGMENTS = 21
-    
-    # File Extensions
-    SUPPORTED_EXTENSIONS = ('.tif', '.tiff')
-    OUTPUT_SCRIPT_NAME = "run_realignment.sh"
-    SESSION_FILE = ".alignment_session.json"
-    
-    # Performance
-    IMAGE_RESIZE_QUALITY = Image.Resampling.NEAREST  # Fast for interactive use
-    CANVAS_UPDATE_DELAY = 10  # milliseconds
-    
-    # UI Overlay constants
-    INFO_OVERLAY_WIDTH = 420
-    INFO_OVERLAY_PADDING = 5
-    INFO_OVERLAY_HEIGHT = 30
-    
-    # Grid label positioning
-    LON_LABEL_LAT = 38  # Latitude for longitude labels
-    LAT_LABEL_LON = -104  # Longitude for latitude labels
-
-
-# --- LCC MATH CLASS ---
-class LCCProjection:
-    """
-    Lambert Conformal Conic Projection implementation.
-    
-    Converts geographic coordinates (latitude/longitude) to projected
-    coordinates (x/y) using the LCC projection with GRS 1980 / NAD83 ellipsoid.
-    """
-    
-    def __init__(self):
-        """Initialize the LCC projection with predefined parameters."""
-        # GRS 1980 / NAD83 ellipsoid parameters
-        self.a = Config.ELLIPSOID_A
-        self.f = Config.ELLIPSOID_F
-        self.e2 = 2 * self.f - self.f ** 2  # First eccentricity squared
-        self.e = math.sqrt(self.e2)  # First eccentricity
-
-        # User Parameters (in radians)
-        self.phi1 = math.radians(Config.LAT_1)
-        self.phi2 = math.radians(Config.LAT_2)
-        self.phi0 = math.radians(Config.LAT_0)
-        self.lam0 = math.radians(Config.LON_0)
-        
-        # Precompute constants for performance
-        self.m1 = self._calc_m(self.phi1)
-        self.m2 = self._calc_m(self.phi2)
-        self.t1 = self._calc_t(self.phi1)
-        self.t2 = self._calc_t(self.phi2)
-        self.t0 = self._calc_t(self.phi0)
-        
-        self.n = math.log(self.m1 / self.m2) / math.log(self.t1 / self.t2)
-        self.F = self.m1 / (self.n * (self.t1 ** self.n))
-        self.rho0 = self.a * self.F * (self.t0 ** self.n)
-        
-        logger.info("LCC Projection initialized with NAD83 parameters")
-
-    def _calc_m(self, phi: float) -> float:
-        """
-        Calculate the m parameter for LCC projection.
-        
-        Args:
-            phi: Latitude in radians
-            
-        Returns:
-            The calculated m parameter
-        """
-        sin_phi = math.sin(phi)
-        return math.cos(phi) / math.sqrt(1 - self.e2 * sin_phi ** 2)
-
-    def _calc_t(self, phi: float) -> float:
-        """
-        Calculate the t parameter for LCC projection.
-        
-        Args:
-            phi: Latitude in radians
-            
-        Returns:
-            The calculated t parameter
-        """
-        sin_phi = math.sin(phi)
-        return math.tan(math.pi / 4 - phi / 2) / (
-            (1 - self.e * sin_phi) / (1 + self.e * sin_phi)
-        ) ** (self.e / 2)
-
-    def project(self, lat_deg: float, lon_deg: float) -> Tuple[float, float]:
-        """
-        Project geographic coordinates to LCC coordinates.
-        
-        Args:
-            lat_deg: Latitude in degrees
-            lon_deg: Longitude in degrees
-            
-        Returns:
-            Tuple of (x, y) coordinates in meters
-        """
-        phi = math.radians(lat_deg)
-        lam = math.radians(lon_deg)
-        t = self._calc_t(phi)
-        rho = self.a * self.F * (t ** self.n)
-        theta = self.n * (lam - self.lam0)
-        x = rho * math.sin(theta)
-        y = self.rho0 - rho * math.cos(theta)
-        return x, y
-
-
-class SmartAlignApp:
-    """
-    Main application class for GeoTIFF alignment.
-    
-    Provides an interactive GUI for aligning and scaling GeoTIFF images
-    with Lambert Conformal Conic projection coordinates.
-    """
-    
-    def __init__(self, root: tk.Tk):
-        """
-        Initialize the SmartAlign application.
-        
-        Args:
-            root: The main Tkinter window
-        """
+class GeorefApp:
+    def __init__(self, root):
         self.root = root
-        self.root.title(Config.WINDOW_TITLE)
-        self.root.geometry(f"{Config.WINDOW_WIDTH}x{Config.WINDOW_HEIGHT}")
+        self.root.title("Rapid GCP Logger (v5: LCC + Preproject/TPS/Order/Reproject)")
+        self.root.geometry("1600x980")
 
-        self.lcc = LCCProjection()
+        # --- State Variables ---
+        self.image_files = []
+        self.current_index = 0
+        self.clicks = []
+        self.click_ids = []
+        self.scale_factor = 1.0
+        self.current_image_path = None
+        self.original_img = None
         
-        # State
-        self.image_files: List[str] = []
-        self.current_index: int = 0
-        self.current_image_path: Optional[str] = None
-        self.output_script: Optional[str] = None
-        self.session_file: Optional[str] = None
-        self.folder_path: Optional[str] = None
-        
-        self.original_img: Optional[Image.Image] = None
-        self.tk_img: Optional[ImageTk.PhotoImage] = None
-        self.orig_w: int = 0
-        self.orig_h: int = 0
-        
-        # View State (viewport navigation)
-        self.scale: float = Config.DEFAULT_SCALE  # View Zoom
-        self.view_pan_x: float = 0    
-        self.view_pan_y: float = 0    
-        
-        # Alignment State (image positioning)
-        self.align_x: float = 0  # Translation X
-        self.align_y: float = 0  # Translation Y
-        self.img_scale: float = 1.0  # Map Scaling Factor
-        
-        # Mouse logic
-        self.drag_start_x: int = 0
-        self.drag_start_y: int = 0
-        self.is_aligning: bool = False
-        
-        # Undo/Redo stacks - using deque for O(1) operations
-        self.undo_stack: deque = deque(maxlen=50)
-        self.redo_stack: deque = deque(maxlen=50)
-
-        # Loupe State
-        self.loupe_items = {}
-        self.tk_loupe_img = None
+        # Magnifier State
         self.zoom_level = 4
         self.loupe_size = 150
         self.loupe_locked = False
         self.locked_coords = (0, 0)
         
-        # Clicking State
-        self.click_mode = False
-        self.clicks = []
-        self.click_ids = []
-        self.target_corners = {} # To store Lat/Lon from dialog
+        # --- UI Layout ---
+        control_frame = tk.Frame(root, height=210, bg="#f0f0f0")
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
 
-        self._update_projection_constants()
-        self._setup_ui()
-        logger.info("SmartAlignApp initialized successfully")
+        btn_load = tk.Button(control_frame, text="1. Load Folder", command=self.load_folder, height=3, bg="#e1e1e1")
+        btn_load.pack(side=tk.LEFT, padx=10)
 
-    def _update_projection_constants(self):
-        """Initialize or re-initialize projection constants based on Config."""
-        # Projection String for GDAL
-        self.PROJ_STRING = (
-            "+proj=lcc "
-            f"+lat_1={Config.LAT_1} "
-            f"+lat_2={Config.LAT_2} "
-            f"+lat_0={Config.LAT_0} "
-            f"+lon_0={Config.LON_0} "
-            "+x_0=0 "
-            "+y_0=0 "
-            "+datum=NAD83 "
-            "+units=m "
-            "+no_defs"
-        )
+        # ----------------- Coordinate Inputs -----------------
+        self.coord_frame = tk.Frame(control_frame)
+        self.coord_frame.pack(side=tk.LEFT, padx=20, pady=5)
         
-        # Base Metadata (Meters)
-        self.base_pixel_w = Config.BASE_PIXEL_WIDTH
-        self.base_pixel_h = Config.BASE_PIXEL_HEIGHT
-        self.default_ul_x = Config.DEFAULT_UL_X
-        self.default_ul_y = Config.DEFAULT_UL_Y
+        tk.Label(self.coord_frame, text="Target Graticule (Lon / Lat)", font=("Arial", 10, "bold")).grid(row=0, columnspan=7, sticky="w")
+        
+        self.entries = []
+        point_labels = [
+            "1. Top-Left",  "2. Top-Mid",  "3. Top-Right",
+            "4. Bot-Left",  "5. Bot-Mid",  "6. Bot-Right"
+        ]
+        defaults = [
+            ("-102.0", "34.0"), ("-99.0", "34.0"), ("-96.0", "34.0"),  # Top
+            ("-102.0", "32.0"), ("-99.0", "32.0"), ("-96.0", "32.0")   # Bottom
+        ]
 
-    def _setup_ui(self):
-        """Set up the user interface components."""
-        # Top Control Bar
-        control_frame = tk.Frame(self.root, height=60, bg="#333")
-        control_frame.pack(side=tk.TOP, fill=tk.X)
+        for i in range(6):
+            r = 1 if i < 3 else 2
+            c_block = (i % 3) * 3
+            tk.Label(self.coord_frame, text=f"{point_labels[i]}:").grid(row=r, column=c_block, padx=(10,2), sticky="e")
+            e_x = tk.Entry(self.coord_frame, width=10)
+            e_y = tk.Entry(self.coord_frame, width=10)
+            e_x.grid(row=r, column=c_block+1)
+            e_y.grid(row=r, column=c_block+2)
+            if i < len(defaults):
+                e_x.insert(0, defaults[i][0])
+                e_y.insert(0, defaults[i][1])
+            self.entries.append((e_x, e_y))
 
-        # Button style - removed bg/fg for Mac compatibility
-        btn_style = {
-            "font": ("Arial", 10, "bold"),
-            # "relief": "flat" # Removed relief as well to let native look take over
-        }
-        
-        tk.Button(
-            control_frame,
-            text="1. Load Folder",
-            command=self.load_folder,
-            **btn_style
-        ).pack(side=tk.LEFT, padx=10, pady=10)
-        
-        tk.Button(
-            control_frame,
-            text="2. Save & Next (Enter)",
-            command=self.save_and_next,
-            **btn_style
-        ).pack(side=tk.LEFT, padx=10, pady=10)
-        
-        tk.Button(
-            control_frame,
-            text="Settings",
-            command=self.open_settings,
-            **btn_style
-        ).pack(side=tk.LEFT, padx=10, pady=10)
-        
-        self.status_label = tk.Label(
-            control_frame,
-            text="Load a folder to start",
-            bg="#333",
-            fg="#00ff00",
-            font=("Consolas", 12)
-        )
-        self.status_label.pack(side=tk.LEFT, padx=20)
-        
-        # Instructions
-        help_frame = tk.Frame(control_frame, bg="#333")
-        help_frame.pack(side=tk.RIGHT, padx=20, pady=5)
-        
-        lbl_style = {"bg": "#333", "fg": "#aaa", "font": ("Arial", 9)}
-        tk.Label(
-            help_frame,
-            text="Zoom: +/- or Wheel | Pan: L-Drag",
-            **lbl_style
-        ).pack(anchor="e")
-        tk.Label(
-            help_frame,
-            text="Move Map: R-Drag | Scale Map: [ ]",
-            **lbl_style
-        ).pack(anchor="e")
+        # ----------------- Projection Settings -----------------
+        proj_frame = tk.Frame(control_frame, bg="#f7f7f7", padx=10, pady=10, bd=1, relief=tk.GROOVE)
+        proj_frame.pack(side=tk.LEFT, padx=12, pady=5)
 
-        # Canvas
-        self.canvas = tk.Canvas(self.root, bg="#222", cursor="crosshair")
+        tk.Label(proj_frame, text="Map Projection (Lambert Conformal Conic)", font=("Arial", 10, "bold"), bg="#f7f7f7").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0,6))
+
+        tk.Label(proj_frame, text="lat_1").grid(row=1, column=0, sticky="e"); self.lat1 = tk.Entry(proj_frame, width=9); self.lat1.grid(row=1, column=1); self.lat1.insert(0, "33")
+        tk.Label(proj_frame, text="lat_2").grid(row=1, column=2, sticky="e"); self.lat2 = tk.Entry(proj_frame, width=9); self.lat2.grid(row=1, column=3); self.lat2.insert(0, "45")
+        tk.Label(proj_frame, text="lat_0").grid(row=1, column=4, sticky="e"); self.lat0 = tk.Entry(proj_frame, width=9); self.lat0.grid(row=1, column=5); self.lat0.insert(0, "33")
+
+        tk.Label(proj_frame, text="lon_0").grid(row=2, column=0, sticky="e"); self.lon0 = tk.Entry(proj_frame, width=9); self.lon0.grid(row=2, column=1); self.lon0.insert(0, "-96")
+        tk.Label(proj_frame, text="x_0").grid(row=2, column=2, sticky="e");  self.x0   = tk.Entry(proj_frame, width=9); self.x0.grid(row=2, column=3); self.x0.insert(0, "0")
+        tk.Label(proj_frame, text="y_0").grid(row=2, column=4, sticky="e");  self.y0   = tk.Entry(proj_frame, width=9); self.y0.grid(row=2, column=5); self.y0.insert(0, "0")
+
+        tk.Label(proj_frame, text="Datum for graticule:").grid(row=3, column=0, sticky="e", pady=(6,0))
+        self.datum_var = tk.StringVar(value="EPSG:4269")  # NAD83 default
+        datum_menu = tk.OptionMenu(proj_frame, self.datum_var, "EPSG:4326 (WGS84)", "EPSG:4269 (NAD83)", "EPSG:4267 (NAD27)")
+        datum_menu.grid(row=3, column=1, columnspan=2, sticky="w", pady=(6,0))
+
+        self.preproject_var = tk.IntVar(value=1)
+        tk.Checkbutton(proj_frame, text="Preproject GCPs to LCC (recommended)", variable=self.preproject_var, bg="#f7f7f7").grid(row=3, column=3, columnspan=3, sticky="w", pady=(6,0))
+
+        # Warp / Reproject options
+        tk.Label(proj_frame, text="Warp model:").grid(row=4, column=0, sticky="e", pady=(6,0))
+        self.warp_model = tk.StringVar(value="order2")
+        tk.OptionMenu(proj_frame, self.warp_model, "order1", "order2", "order3", "tps").grid(row=4, column=1, sticky="w", pady=(6,0))
+
+        tk.Label(proj_frame, text="Resampling:").grid(row=4, column=2, sticky="e", pady=(6,0))
+        self.resample = tk.StringVar(value="cubic")
+        tk.OptionMenu(proj_frame, self.resample, "near", "bilinear", "cubic", "lanczos").grid(row=4, column=3, sticky="w", pady=(6,0))
+
+        tk.Label(proj_frame, text="Refine GCPs tol,min:").grid(row=4, column=4, sticky="e", pady=(6,0))
+        self.refine_tol = tk.Entry(proj_frame, width=6); self.refine_tol.grid(row=4, column=5, sticky="w", pady=(6,0)); self.refine_tol.insert(0, "")  # blank=off
+        self.refine_min = tk.Entry(proj_frame, width=4); self.refine_min.grid(row=4, column=5, sticky="e", pady=(6,0)); self.refine_min.insert(0, "")
+
+        tk.Label(proj_frame, text="Final target EPSG (optional):").grid(row=5, column=0, sticky="e", pady=(6,0))
+        self.target_epsg = tk.Entry(proj_frame, width=12); self.target_epsg.grid(row=5, column=1, sticky="w", pady=(6,0)); self.target_epsg.insert(0, "")  # e.g., 3857
+
+        # ----------------- Info -----------------
+        info_frame = tk.Frame(control_frame)
+        info_frame.pack(side=tk.RIGHT, padx=20)
+        self.status_label = tk.Label(info_frame, text="Load a folder to start.", fg="blue", font=("Arial", 16, "bold"))
+        self.status_label.pack()
+        instructions = "L-Click: Record | R-Click: Undo\nShift: Lock Loupe | Arrows: Nudge"
+        tk.Label(info_frame, text=instructions, fg="gray").pack()
+
+        # ----------------- Canvas -----------------
+        self.canvas_frame = tk.Frame(root, bg="gray")
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True)
+        self.canvas = tk.Canvas(self.canvas_frame, bg="#333", cursor="crosshair")
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        self._bind_events()
-
-    def _bind_events(self):
-        """Bind all keyboard and mouse events."""
-        # Mouse Bindings - Pan viewport with left click
-        self.canvas.bind(
-            "<ButtonPress-1>",
-            self.handle_click
-        )
-        self.canvas.bind("<B1-Motion>", self.do_drag)
+        # Bindings
+        self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<Button-3>", self.undo_click) # Windows/Linux
+        self.canvas.bind("<Button-2>", self.undo_click) # Mac
         
-        # Mouse Bindings - Move map with right click
-        self.canvas.bind(
-            "<ButtonPress-3>",
-            lambda e: self.start_drag(e, aligning=True)
-        )
-        self.canvas.bind("<B3-Motion>", self.do_drag)
-        
-        # Mouse Bindings - Move map with Shift+Left (Mac compatibility)
-        self.canvas.bind(
-            "<Shift-ButtonPress-1>",
-            lambda e: self.start_drag(e, aligning=True)
-        )
-        self.canvas.bind("<Shift-B1-Motion>", self.do_drag)
-
-        # Mouse wheel zoom
-        self.canvas.bind("<MouseWheel>", self.zoom_wheel)
-        self.canvas.bind("<Button-4>", self.zoom_wheel)  # Linux scroll up
-        self.canvas.bind("<Button-5>", self.zoom_wheel)  # Linux scroll down
-        
-        # Keyboard Zoom (View)
-        self.root.bind("<plus>", lambda e: self.zoom_key(Config.ZOOM_FACTOR))
-        self.root.bind("<equal>", lambda e: self.zoom_key(Config.ZOOM_FACTOR))
-        self.root.bind("<minus>", lambda e: self.zoom_key(1 / Config.ZOOM_FACTOR))
-        self.root.bind("<underscore>", lambda e: self.zoom_key(1 / Config.ZOOM_FACTOR))
-
-        # Keyboard Scale (Map Image)
-        self.root.bind(
-            "<bracketleft>",
-            lambda e: self.change_img_scale(Config.SCALE_FACTOR_FINE)
-        )  # [
-        self.root.bind(
-            "<bracketright>",
-            lambda e: self.change_img_scale(1 / Config.SCALE_FACTOR_FINE)
-        )  # ]
-        self.root.bind(
-            "<braceleft>",
-            lambda e: self.change_img_scale(Config.SCALE_FACTOR_COARSE)
-        )  # Shift+[
-        self.root.bind(
-            "<braceright>",
-            lambda e: self.change_img_scale(1 / Config.SCALE_FACTOR_COARSE)
-        )  # Shift+]
-
-        # Navigation
-        self.root.bind("<Return>", lambda e: self.save_and_next())
-        self.root.bind("<Left>", lambda e: self.nudge(-1, 0))
-        self.root.bind("<Right>", lambda e: self.nudge(1, 0))
-        self.root.bind("<Up>", lambda e: self.nudge(0, -1))
-        self.root.bind("<Down>", lambda e: self.nudge(0, 1))
-        
-        # Undo/Redo
-        self.root.bind("<Control-z>", lambda e: self.undo())
-        self.root.bind("<Control-y>", lambda e: self.redo())
-        self.root.bind("<Control-Shift-Z>", lambda e: self.redo())
-        
-        # Help
-        self.root.bind("<Escape>", lambda e: self.show_help())
-        self.root.bind("<F1>", lambda e: self.show_help())
-        
-        # Loupe Bindings
         self.canvas.bind("<Motion>", self.update_loupe)
         self.canvas.bind("<Leave>", self.hide_loupe)
+        
         self.root.bind("<Shift_L>", self.enable_lock)
         self.root.bind("<Shift_R>", self.enable_lock)
         self.root.bind("<KeyRelease-Shift_L>", self.disable_lock)
         self.root.bind("<KeyRelease-Shift_R>", self.disable_lock)
-    
-    def _save_state(self):
-        """Save current alignment state to undo stack."""
-        state = {
-            'align_x': self.align_x,
-            'align_y': self.align_y,
-            'img_scale': self.img_scale,
-            'view_pan_x': self.view_pan_x,
-            'view_pan_y': self.view_pan_y,
-            'scale': self.scale
-        }
-        self.undo_stack.append(state)  # O(1) with deque
-        self.redo_stack.clear()  # Clear redo stack on new action
-        logger.debug(f"State saved (undo stack: {len(self.undo_stack)})")
-    
-    def undo(self):
-        """Undo the last alignment change."""
-        if not self.undo_stack:
-            logger.info("Nothing to undo")
-            self._show_feedback("Nothing to undo", duration=1000)
-            return
-        
-        # Save current state to redo stack
-        current_state = {
-            'align_x': self.align_x,
-            'align_y': self.align_y,
-            'img_scale': self.img_scale,
-            'view_pan_x': self.view_pan_x,
-            'view_pan_y': self.view_pan_y,
-            'scale': self.scale
-        }
-        self.redo_stack.append(current_state)
-        
-        # Restore previous state
-        state = self.undo_stack.pop()
-        self.align_x = state['align_x']
-        self.align_y = state['align_y']
-        self.img_scale = state['img_scale']
-        self.view_pan_x = state['view_pan_x']
-        self.view_pan_y = state['view_pan_y']
-        self.scale = state['scale']
-        
-        self.redraw()
-        logger.info("Undo performed")
-        self._show_feedback("Undo", duration=500)
-    
-    def redo(self):
-        """Redo the last undone change."""
-        if not self.redo_stack:
-            logger.info("Nothing to redo")
-            self._show_feedback("Nothing to redo", duration=1000)
-            return
-        
-        # Save current state to undo stack
-        self._save_state()
-        self.undo_stack.pop()  # Remove the duplicate we just added
-        
-        # Restore redo state
-        state = self.redo_stack.pop()
-        self.align_x = state['align_x']
-        self.align_y = state['align_y']
-        self.img_scale = state['img_scale']
-        self.view_pan_x = state['view_pan_x']
-        self.view_pan_y = state['view_pan_y']
-        self.scale = state['scale']
-        
-        self.redraw()
-        logger.info("Redo performed")
-        self._show_feedback("Redo", duration=500)
-    
-    def show_help(self):
-        """Display keyboard shortcuts help dialog."""
-        help_window = tk.Toplevel(self.root)
-        help_window.title("Keyboard Shortcuts")
-        help_window.geometry("600x500")
-        help_window.configure(bg="#2b2b2b")
-        
-        # Create frame with scrollbar
-        main_frame = tk.Frame(help_window, bg="#2b2b2b")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Title
-        title = tk.Label(
-            main_frame,
-            text="⌨️ Keyboard Shortcuts",
-            font=("Arial", 18, "bold"),
-            bg="#2b2b2b",
-            fg="#ffffff"
-        )
-        title.pack(pady=(0, 20))
-        
-        # Create sections
-        shortcuts = [
-            ("View Navigation", [
-                ("+/=", "Zoom in"),
-                ("-/_", "Zoom out"),
-                ("Mouse Wheel", "Zoom at cursor position"),
-                ("Left Click + Drag", "Pan viewport"),
-            ]),
-            ("Map Alignment", [
-                ("Right Click + Drag", "Move map image"),
-                ("Shift + Left Drag", "Move map (Mac)"),
-                ("Arrow Keys", "Nudge map position"),
-                ("[", "Scale down (fine adjustment)"),
-                ("]", "Scale up (fine adjustment)"),
-                ("Shift + [", "Scale down (coarse)"),
-                ("Shift + ]", "Scale up (coarse)"),
-            ]),
-            ("File Operations", [
-                ("Enter", "Save alignment and next image"),
-            ]),
-            ("Editing", [
-                ("Ctrl+Z", "Undo last change"),
-                ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
-            ]),
-            ("Help", [
-                ("Esc / F1", "Show this help dialog"),
-            ]),
-        ]
-        
-        for section_title, items in shortcuts:
-            # Section header
-            section_label = tk.Label(
-                main_frame,
-                text=section_title,
-                font=("Arial", 12, "bold"),
-                bg="#2b2b2b",
-                fg="#4CAF50",
-                anchor="w"
-            )
-            section_label.pack(fill=tk.X, pady=(10, 5))
-            
-            # Section items
-            for key, description in items:
-                item_frame = tk.Frame(main_frame, bg="#2b2b2b")
-                item_frame.pack(fill=tk.X, pady=2)
-                
-                key_label = tk.Label(
-                    item_frame,
-                    text=key,
-                    font=("Courier", 10, "bold"),
-                    bg="#404040",
-                    fg="#FFD700",
-                    padx=10,
-                    pady=5,
-                    width=25,
-                    anchor="w"
-                )
-                key_label.pack(side=tk.LEFT, padx=(0, 10))
-                
-                desc_label = tk.Label(
-                    item_frame,
-                    text=description,
-                    font=("Arial", 10),
-                    bg="#2b2b2b",
-                    fg="#cccccc",
-                    anchor="w"
-                )
-                desc_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Close button
-        close_btn = tk.Button(
-            main_frame,
-            text="Close",
-            command=help_window.destroy,
-            font=("Arial", 11, "bold"),
-            bg="#555",
-            fg="white",
-            padx=30,
-            pady=10,
-            relief="flat",
-            cursor="hand2"
-        )
-        close_btn.pack(pady=(20, 0))
-        
-        # Center the window
-        help_window.transient(self.root)
-        help_window.grab_set()
-        help_window.focus_set()
+        self.root.bind("<Left>", lambda e: self.nudge_cursor(-1, 0))
+        self.root.bind("<Right>", lambda e: self.nudge_cursor(1, 0))
+        self.root.bind("<Up>", lambda e: self.nudge_cursor(0, -1))
+        self.root.bind("<Down>", lambda e: self.nudge_cursor(0, 1))
 
+        self.loupe_items = {}
+        self.tk_loupe_img = None
+
+    # ----------------- File & Image Handling -----------------
     def load_folder(self):
-        """
-        Load a folder containing TIFF files and prepare for alignment.
+        folder_selected = filedialog.askdirectory()
+        if not folder_selected: return
         
-        Creates output script file if it doesn't exist and loads the first image.
-        """
-        folder = filedialog.askdirectory(title="Select Folder with TIFF Files")
-        if not folder:
-            logger.info("Folder selection cancelled")
-            return
+        self.image_files = [
+            os.path.join(folder_selected, f)
+            for f in os.listdir(folder_selected)
+            if f.lower().endswith(('.tif', '.tiff'))
+        ]
+        self.image_files.sort()
         
-        logger.info(f"Loading folder: {folder}")
-        self.folder_path = folder
-        
-        try:
-            # Find all TIFF files in the folder
-            self.image_files = [
-                os.path.join(folder, f)
-                for f in os.listdir(folder)
-                if f.lower().endswith(Config.SUPPORTED_EXTENSIONS)
-            ]
-            self.image_files.sort()
-            
-            if not self.image_files:
-                logger.warning(f"No TIFF files found in {folder}")
-                return messagebox.showerror(
-                    "Error",
-                    "No TIFF files found in the selected folder"
-                )
-
-            logger.info(f"Found {len(self.image_files)} TIFF files")
-
-            # Create output script if it doesn't exist
-            self.output_script = os.path.join(folder, Config.OUTPUT_SCRIPT_NAME)
-            if not os.path.exists(self.output_script):
-                with open(self.output_script, "w") as f:
-                    f.write("#!/bin/bash\n")
-                    f.write("# GeoTIFF Alignment Script\n")
-                    f.write(f"# Generated by GeoTIFF Aligner on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                    f.write("mkdir -p aligned\n\n")
-                logger.info(f"Created output script: {self.output_script}")
-
-            # Set up session file
-            self.session_file = os.path.join(folder, Config.SESSION_FILE)
-            
-            # Load session if exists
-            session_loaded = self._load_session()
-            
-            if not session_loaded:
-                self.current_index = 0
-                
-                # New Workflow: Prompt for Projection and Corners
-                if self._run_setup_workflow():
-                    self.load_image()
-                else:
-                    logger.info("Setup workflow cancelled")
-            else:
-                self.load_image()
-            
-        except Exception as e:
-            logger.error(f"Error loading folder: {e}", exc_info=True)
-            messagebox.showerror("Error", f"Failed to load folder: {str(e)}")
-    
-    def _load_session(self) -> bool:
-        """
-        Load session data if it exists.
-        
-        Returns:
-            True if session was loaded, False otherwise
-        """
-        if not self.session_file or not os.path.exists(self.session_file):
-            return False
-        
-        try:
-            with open(self.session_file, 'r') as f:
-                session_data = json.load(f)
-            
-            # Validate session data structure
-            if not isinstance(session_data, dict):
-                logger.warning("Invalid session data structure")
-                return False
-            
-            required_keys = ['files', 'current_index', 'timestamp']
-            if not all(key in session_data for key in required_keys):
-                logger.warning("Session data missing required keys")
-                return False
-            
-            # Validate data types
-            if not isinstance(session_data['files'], list):
-                logger.warning("Invalid files list in session data")
-                return False
-            
-            if not isinstance(session_data['current_index'], int):
-                logger.warning("Invalid current_index in session data")
-                return False
-            
-            # Verify session is for current files
-            if session_data.get('files') != self.image_files:
-                logger.info("Session files don't match, starting fresh")
-                return False
-            
-            # Sanitize current_index
-            current_index = max(0, min(session_data['current_index'], len(self.image_files) - 1))
-            self.current_index = current_index
-            
-            logger.info(f"Session loaded: resuming at image {self.current_index + 1}")
-            
-            # Ask user if they want to resume
-            resume = messagebox.askyesno(
-                "Resume Session",
-                f"Found previous session. Resume at image {self.current_index + 1}/{len(self.image_files)}?"
-            )
-            
-            if not resume:
-                self.current_index = 0
-                return False
-            
-            return True
-            
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.error(f"Error loading session (corrupted file): {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Error loading session: {e}", exc_info=True)
-            return False
-    
-    def _save_session(self):
-        """Save current session state using atomic write."""
-        if not self.session_file or not self.folder_path:
-            return
-        
-        try:
-            session_data = {
-                'files': self.image_files,
-                'current_index': self.current_index,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            # Validate session_file path is within expected directory
-            session_path = os.path.abspath(self.session_file)
-            folder_path = os.path.abspath(self.folder_path)
-            
-            if not session_path.startswith(folder_path):
-                logger.error("Session file path validation failed")
-                return
-            
-            # Use atomic write: write to temp file, then rename
-            # Use a safe temp filename in the same directory
-            temp_file = session_path + '.tmp'
-            
-            try:
-                with open(temp_file, 'w') as f:
-                    json.dump(session_data, f, indent=2)
-                
-                # Atomic rename (on POSIX systems)
-                os.replace(temp_file, session_path)
-                logger.debug("Session saved")
-                
-            except (OSError, IOError) as e:
-                logger.error(f"Error writing session file: {e}")
-                # Clean up temp file if it exists
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except OSError:
-                        pass
-            
-        except Exception as e:
-            logger.error(f"Error saving session: {e}", exc_info=True)
-
-    def load_image(self):
-        """
-        Load the current image from the file list.
-        
-        Resets alignment parameters and centers the image in the viewport.
-        """
-        if self.current_index >= len(self.image_files):
-            self.status_label.config(text="ALL DONE! ✓")
-            self.canvas.delete("all")
-            logger.info("All images processed")
-            return
-
-        self.current_image_path = self.image_files[self.current_index]
-        filename = os.path.basename(self.current_image_path)
-        status_text = f"{self.current_index + 1}/{len(self.image_files)}: {filename}"
-        self.status_label.config(text=status_text)
-        logger.info(f"Loading image: {filename}")
-
-        try:
-            self.original_img = Image.open(self.current_image_path)
-            self.orig_w, self.orig_h = self.original_img.size
-            logger.info(f"Image size: {self.orig_w}x{self.orig_h}")
-            
-            # Reset Alignment & Scale - REMOVED for persistence
-            # self.align_x = 0
-            # self.align_y = 0
-            # self.img_scale = 1.0
-
-            # Calculate initial scale to fit image in viewport
-            self.root.update()
-            cw = self.canvas.winfo_width()
-            ch = self.canvas.winfo_height()
-            
-            # Scale to fit 90% of the viewport
-            scale_w = cw / self.orig_w
-            scale_h = ch / self.orig_h
-            self.scale = min(scale_w, scale_h) * 0.9
-            
-            # Ensure scale is within valid range
-            if self.scale <= 0:
-                self.scale = Config.DEFAULT_SCALE
-            self.scale = max(
-                Config.MIN_SCALE,
-                min(Config.MAX_SCALE, self.scale)
-            )
-            
-            # Center the image in the viewport
-            center_w = (self.orig_w * self.scale) / 2
-            center_h = (self.orig_h * self.scale) / 2
-            self.view_pan_x = (cw / 2) - center_w
-            self.view_pan_y = (ch / 2) - center_h
-            
-            self.redraw()
-            logger.info(f"Image loaded successfully with scale {self.scale:.4f}")
-            
-        except Exception as e:
-            logger.error(f"Error loading image {filename}: {e}", exc_info=True)
-            messagebox.showerror("Error", f"Failed to load image: {str(e)}")
-
-    # --- Interaction ---
-
-    def start_drag(self, event: tk.Event, aligning: bool):
-        """
-        Start a drag operation (either pan or align).
-        
-        Args:
-            event: The mouse event
-            aligning: If True, move the map; if False, pan the viewport
-        """
-        # Save state for undo when starting alignment drag
-        if aligning:
-            self._save_state()
-        
-        self.drag_start_x = event.x
-        self.drag_start_y = event.y
-        self.is_aligning = aligning
-        logger.debug(f"Started {'align' if aligning else 'pan'} drag at ({event.x}, {event.y})")
-
-    def do_drag(self, event: tk.Event):
-        """
-        Continue a drag operation.
-        
-        Args:
-            event: The mouse event
-        """
-        dx = event.x - self.drag_start_x
-        dy = event.y - self.drag_start_y
-        
-        if self.is_aligning:
-            # Make alignment scale-independent
-            self.align_x += dx / self.scale
-            self.align_y += dy / self.scale
-        else:
-            self.view_pan_x += dx
-            self.view_pan_y += dy
-        
-        self.drag_start_x = event.x
-        self.drag_start_y = event.y
-        self.redraw()
-
-    def nudge(self, dx: int, dy: int):
-        """
-        Nudge the image by a small amount using arrow keys.
-        
-        Args:
-            dx: Change in x direction (pixels)
-            dy: Change in y direction (pixels)
-        """
-        # Nudge in screen pixels, converted to scale-independent units
-        self.align_x += dx / self.scale
-        self.align_y += dy / self.scale
-        self.redraw()
-        logger.debug(f"Nudged by ({dx}, {dy})")
-
-    def change_img_scale(self, factor: float):
-        """
-        Scale the map image around the center of the current view.
-        
-        Args:
-            factor: The scaling factor to apply (e.g., 1.005 for slight increase)
-        """
-        old_scale = self.img_scale
-        new_scale = self.img_scale * factor
-        
-        # Enforce scale limits - check before saving state
-        if new_scale < Config.MIN_IMG_SCALE or new_scale > Config.MAX_IMG_SCALE:
-            logger.debug(f"Scale limit reached: {new_scale:.3f}")
-            return
-        
-        # Save state for undo only after validating the change
-        self._save_state()
-        
-        # Adjust align_x/y so the visual center stays fixed relative to the screen
-        # This prevents the image from shifting when scaling
-        w_factor = self.orig_w * self.scale
-        h_factor = self.orig_h * self.scale
-        
-        delta_w = w_factor * (new_scale - old_scale)
-        delta_h = h_factor * (new_scale - old_scale)
-        
-        # Shift top-left position to keep center fixed
-        # Adjustments must be scale-independent
-        self.align_x -= (delta_w / 2) / self.scale
-        self.align_y -= (delta_h / 2) / self.scale
-        
-        self.img_scale = new_scale
-        self.redraw()
-        logger.info(f"Image scale changed to {self.img_scale:.3f}x")
-        
-        # Show visual feedback
-        self._show_feedback(f"Scale: {self.img_scale:.3f}x")
-    
-    def _show_feedback(self, text: str, duration: int = 1000):
-        """
-        Display temporary feedback text on the canvas.
-        
-        Args:
-            text: The text to display
-            duration: How long to show the text in milliseconds
-        """
-        try:
-            self.canvas.create_text(
-                self.canvas.winfo_width() / 2,
-                50,
-                text=text,
-                fill="yellow",
-                font=("Arial", 16, "bold"),
-                tags="feedback"
-            )
-            self.root.after(duration, lambda: self.canvas.delete("feedback"))
-        except Exception as e:
-            logger.error(f"Error showing feedback: {e}")
-
-    def zoom_wheel(self, event: tk.Event):
-        """
-        Handle mouse wheel zoom events.
-        
-        Args:
-            event: The mouse wheel event
-        """
-        if event.num == 5 or event.delta < 0:
-            factor = Config.ZOOM_WHEEL_FACTOR
-        else:
-            factor = 1 / Config.ZOOM_WHEEL_FACTOR
-            
-        mouse_x = self.canvas.canvasx(event.x)
-        mouse_y = self.canvas.canvasy(event.y)
-        self._apply_zoom(factor, mouse_x, mouse_y)
-
-    def zoom_key(self, factor: float):
-        """
-        Handle keyboard zoom events.
-        
-        Args:
-            factor: The zoom factor to apply
-        """
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-        self._apply_zoom(factor, cw / 2, ch / 2)
-
-    def _apply_zoom(self, factor: float, center_x: float, center_y: float):
-        """
-        Apply zoom transformation around a specific point.
-        
-        Args:
-            factor: The zoom factor to apply
-            center_x: X coordinate of zoom center
-            center_y: Y coordinate of zoom center
-        """
-        new_scale = self.scale * factor
-        
-        # Enforce scale limits
-        if new_scale < Config.MIN_SCALE or new_scale > Config.MAX_SCALE:
-            logger.debug(f"Zoom limit reached: {new_scale:.4f}")
-            return
-
-        # Calculate relative position to zoom center
-        rel_x = (center_x - self.view_pan_x) / self.scale
-        rel_y = (center_y - self.view_pan_y) / self.scale
-        
-        # Apply new scale and adjust pan to keep zoom point fixed
-        self.scale = new_scale
-        self.view_pan_x = center_x - (rel_x * self.scale)
-        self.view_pan_y = center_y - (rel_y * self.scale)
-        
-        self.redraw()
-        logger.debug(f"Zoom applied: scale={self.scale:.4f}")
-
-    # --- Rendering ---
-
-    def redraw(self):
-        """Redraw the canvas with the current image and grid overlay."""
-        if not self.original_img:
-            return
-            
-        try:
-            self.canvas.delete("all")
-            
-            # 1. Draw Image
-            disp_w = int(self.orig_w * self.scale * self.img_scale)
-            disp_h = int(self.orig_h * self.scale * self.img_scale)
-            
-            img_x = self.view_pan_x + (self.align_x * self.scale)
-            img_y = self.view_pan_y + (self.align_y * self.scale)
-            
-            if disp_w > 1 and disp_h > 1:
-                resized = self.original_img.resize(
-                    (disp_w, disp_h),
-                    Config.IMAGE_RESIZE_QUALITY
-                )
-                self.tk_img = ImageTk.PhotoImage(resized)
-                self.canvas.create_image(img_x, img_y, anchor=tk.NW, image=self.tk_img)
-            
-            # 2. Draw Grid
-            self._draw_grid()
-            
-            # 3. Draw Alignment Info
-            self._draw_alignment_info()
-            
-        except Exception as e:
-            logger.error(f"Error redrawing canvas: {e}", exc_info=True)
-    
-    def _draw_alignment_info(self):
-        """Draw alignment information overlay."""
-        cw = self.canvas.winfo_width()
-        
-        # Calculate shift in meters (align_x/y are now scale-independent pixels)
-        shift_m_x = self.align_x * self.base_pixel_w
-        shift_m_y = self.align_y * abs(self.base_pixel_h)
-        
-        info_text = (
-            f"Scale: {self.img_scale:.4f}x  |  "
-            f"Shift: ({shift_m_x:.1f}m, {shift_m_y:.1f}m)  |  "
-            f"View Zoom: {self.scale:.4f}x"
-        )
-        
-        # Draw semi-transparent background
-        text_bg = self.canvas.create_rectangle(
-            cw - Config.INFO_OVERLAY_WIDTH,
-            Config.INFO_OVERLAY_PADDING,
-            cw - Config.INFO_OVERLAY_PADDING,
-            Config.INFO_OVERLAY_HEIGHT,
-            fill="#000000",
-            outline="#555555",
-            stipple="gray50",
-            tags="info"
-        )
-        
-        # Draw info text
-        self.canvas.create_text(
-            cw - 10, 17,
-            text=info_text,
-            fill="#00ff00",
-            font=("Courier", 9, "bold"),
-            anchor="e",
-            tags="info"
-        )
-    
-    def _draw_grid(self):
-        """Draw the geographic grid overlay with lat/lon lines."""
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-        
-        # Helper function to convert lat/lon to screen coordinates
-        def to_screen(lat: float, lon: float) -> Tuple[float, float]:
-            """Convert geographic coordinates to screen coordinates."""
-            mx, my = self.lcc.project(lat, lon)
-            dx_m = mx - self.default_ul_x
-            dy_m = self.default_ul_y - my 
-            
-            dx_px = (dx_m / self.base_pixel_w) * self.scale
-            dy_px = (dy_m / abs(self.base_pixel_h)) * self.scale
-            
-            sx = self.view_pan_x + dx_px
-            sy = self.view_pan_y + dy_px
-            return sx, sy
-
-        # Draw Longitude Lines (vertical)
-        for lon in range(Config.LON_MIN, Config.LON_MAX + 1):
-            coords = []
-            visible = False
-            
-            for i in range(Config.GRID_SEGMENTS):
-                lat = Config.LAT_MIN + (Config.LAT_MAX - Config.LAT_MIN) * (i / (Config.GRID_SEGMENTS - 1))
-                sx, sy = to_screen(lat, lon)
-                coords.extend([sx, sy])
-                if 0 <= sx <= cw and 0 <= sy <= ch:
-                    visible = True
-            
-            if visible and len(coords) >= 4:
-                self.canvas.create_line(
-                    coords,
-                    fill="cyan",
-                    smooth=True,
-                    dash=(2, 4),
-                    tags="grid"
-                )
-                # Add longitude label
-                mx, my = to_screen(Config.LON_LABEL_LAT, lon)
-                if 0 <= mx <= cw:
-                    self.canvas.create_text(
-                        mx, 20,
-                        text=f"{lon}°",
-                        fill="cyan",
-                        font=("Arial", 9, "bold"),
-                        tags="grid_label"
-                    )
-
-        # Draw Latitude Lines (horizontal)
-        for lat in range(Config.LAT_MIN, Config.LAT_MAX + 1):
-            coords = []
-            visible = False
-            
-            for i in range(Config.GRID_SEGMENTS):
-                lon = Config.LON_MIN + (Config.LON_MAX - Config.LON_MIN) * (i / (Config.GRID_SEGMENTS - 1))
-                sx, sy = to_screen(lat, lon)
-                coords.extend([sx, sy])
-                if 0 <= sx <= cw and 0 <= sy <= ch:
-                    visible = True
-            
-            if visible and len(coords) >= 4:
-                self.canvas.create_line(
-                    coords,
-                    fill="#00ff00",
-                    smooth=True,
-                    dash=(2, 4),
-                    tags="grid"
-                )
-                # Add latitude label
-                mx, my = to_screen(lat, Config.LAT_LABEL_LON)
-                if 0 <= my <= ch:
-                    self.canvas.create_text(
-                        30, my,
-                        text=f"{lat}N",
-                        fill="#00ff00",
-                        font=("Arial", 9, "bold"),
-                        tags="grid_label"
-                    )
-
-        # Draw Origin Marker
-        ox, oy = to_screen(Config.LAT_0, Config.LON_0)
-        self.canvas.create_line(
-            ox - 20, oy, ox + 20, oy,
-            fill="red",
-            width=3,
-            tags="origin"
-        )
-        self.canvas.create_line(
-            ox, oy - 20, ox, oy + 20,
-            fill="red",
-            width=3,
-            tags="origin"
-        )
-        self.canvas.create_text(
-            ox + 25, oy + 25,
-            text="ORIGIN",
-            fill="red",
-            anchor="nw",
-            tags="origin_label"
-        )
-
-    def save_and_next(self):
-        """
-        Save the current alignment to the output script and move to the next image.
-        
-        Calculates the final georeferencing parameters based on the current
-        alignment and scaling, then writes a gdal_translate command to the script.
-        """
-        if not self.current_image_path or not self.output_script:
-            logger.warning("Cannot save: no image or output script")
-            return
-        
-        try:
-            # Convert pixel shifts to meter shifts
-            # align_x/y are scale-independent, so just multiply by base pixel size
-            shift_meters_x = self.align_x * self.base_pixel_w
-            shift_meters_y = self.align_y * abs(self.base_pixel_h)
-            
-            # Calculate final upper-left corner in meters
-            final_ul_x = self.default_ul_x - shift_meters_x
-            final_ul_y = self.default_ul_y + shift_meters_y
-            
-            # Calculate image dimensions in meters (accounting for scaling)
-            final_width_m = self.orig_w * self.base_pixel_w * self.img_scale
-            final_height_m = self.orig_h * self.base_pixel_h * self.img_scale  # Negative
-            
-            # Calculate lower-right corner
-            final_lr_x = final_ul_x + final_width_m
-            final_lr_y = final_ul_y + final_height_m
-            
-            filename = os.path.basename(self.current_image_path)
-            
-            # Properly escape filename for shell command to prevent injection
-            escaped_filename = shlex.quote(filename)
-            escaped_output = shlex.quote(f"aligned/{filename}")
-            
-            # Build gdal_translate command with properly escaped filenames
-            cmd = (
-                f"gdal_translate "
-                f"-a_ullr {final_ul_x:.3f} {final_ul_y:.3f} "
-                f"{final_lr_x:.3f} {final_lr_y:.3f} "
-                f"-a_srs '{self.PROJ_STRING}' "
-                f"{escaped_filename} {escaped_output}"
-            )
-            
-            # Write to script
-            with open(self.output_script, "a") as f:
-                f.write(f"echo 'Aligning {filename}...'\n")
-                f.write(cmd + "\n\n")
-            
-            logger.info(f"Saved alignment for {filename}")
-            logger.info(f"  UL: ({final_ul_x:.3f}, {final_ul_y:.3f})")
-            logger.info(f"  LR: ({final_lr_x:.3f}, {final_lr_y:.3f})")
-            logger.info(f"  Scale: {self.img_scale:.3f}x")
-            
-            print(f"✓ Saved {filename}")
-            
-            # Move to next image
-            self.current_index += 1
-            
-            # Save session progress
-            self._save_session()
-            
-            # Clear undo/redo stacks for new image
-            self.undo_stack.clear()
-            self.redo_stack.clear()
-            
-            self.load_image()
-            
-        except Exception as e:
-            logger.error(f"Error saving alignment: {e}", exc_info=True)
-            messagebox.showerror("Error", f"Failed to save alignment: {str(e)}")
-
-    def open_settings(self):
-        """Open the settings dialog."""
-        SettingsDialog(self.root, self)
-
-    def reinitialize_projection(self):
-        """Re-initialize projection after settings change."""
-        self.lcc = LCCProjection()
-        self._update_projection_constants()
-        self.redraw()
-        logger.info("Projection re-initialized with new settings")
-
-    def _run_setup_workflow(self) -> bool:
-        """
-        Run the initial setup workflow (Projection -> Corners).
-        
-        Returns:
-            True if completed successfully, False if cancelled.
-        """
-        # 1. Projection Setup
-        proj_dialog = ProjectionSetupDialog(self.root, self)
-        self.root.wait_window(proj_dialog.window)
-        if not proj_dialog.result:
-            return False
-            
-        # 2. Corners Setup (Get Lat/Lon)
-        corners_dialog = CornersDialog(self.root, self)
-        self.root.wait_window(corners_dialog.window)
-        if not corners_dialog.result:
-            return False
-            
-        self.target_corners = corners_dialog.result
-        
-        # 3. Interactive Clicking (Get Pixels)
-        # Load the first image so user can see it
         if not self.image_files:
-            messagebox.showerror("Error", "No images found in folder")
-            return False
+            messagebox.showerror("Error", "No TIF files found.")
+            return
             
-        # Temporarily load image without projection/alignment
+        self.output_script = os.path.join(folder_selected, "run_georeference.sh")
+        if not os.path.exists(self.output_script):
+            with open(self.output_script, "w") as f:
+                f.write("#!/bin/bash\nset -euo pipefail\nmkdir -p georeferenced\n\n")
+
         self.current_index = 0
         self.load_image()
-        
-        # Start Clicking Mode
-        self.click_mode = True
+
+    def load_image(self):
+        if self.current_index >= len(self.image_files):
+            self.status_label.config(text="All Done! Script generated.")
+            self.canvas.delete("all")
+            return
+
         self.clicks = []
         self.click_ids = []
-        self._update_click_status()
-        
-        # Wait for 4 clicks (This blocks the workflow until clicks are done)
-        # We use a local event loop or wait_variable
-        self.click_done_var = tk.BooleanVar()
-        self.root.wait_variable(self.click_done_var)
-        
-        self.click_mode = False
-        
-        if not self.click_done_var.get():
-            return False
+        self.current_image_path = self.image_files[self.current_index]
+        self.update_status()
 
-        # 4. Calculate Geometry
+        self.original_img = Image.open(self.current_image_path)
+        self.orig_w, self.orig_h = self.original_img.size
+        
+        self.root.update()
+        canvas_w = max(self.canvas.winfo_width(), 1000)
+        canvas_h = max(self.canvas.winfo_height(), 800)
+        
+        ratio = min(canvas_w/self.orig_w, canvas_h/self.orig_h)
+        self.scale_factor = ratio
+        
+        new_w = int(self.orig_w * ratio)
+        new_h = int(self.orig_h * ratio)
+        
+        resized_img = self.original_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(resized_img)
+        
+        self.canvas.delete("all")
+        self.loupe_items = {}
+        
+        self.x_offset = (canvas_w - new_w) // 2
+        self.y_offset = (canvas_h - new_h) // 2
+        
+        self.canvas.create_image(self.x_offset, self.y_offset, anchor=tk.NW, image=self.tk_img, tags="main_img")
+
+    # ----------------- Loupe / Cursor -----------------
+    def nudge_cursor(self, dx, dy):
         try:
-            # Map clicks to corners: NW, NE, SE, SW
-            # We assume user clicked in that order as prompted
-            clicked_pixels = {
-                'nw': self.clicks[0],
-                'ne': self.clicks[1],
-                'se': self.clicks[2],
-                'sw': self.clicks[3]
-            }
-            
-            self._calculate_geometry(self.target_corners, clicked_pixels)
-            return True
-        except Exception as e:
-            logger.error(f"Geometry calculation failed: {e}")
-            messagebox.showerror("Error", f"Failed to calculate geometry: {e}")
-            return False
+            x = self.root.winfo_pointerx() + dx
+            y = self.root.winfo_pointery() + dy
+            self.root.event_generate('<Motion>', warp=True, x=x, y=y)
+        except:
+            pass
 
-    def _update_click_status(self):
-        """Update status label during clicking mode."""
-        labels = [
-            "1. Click North-West Corner (Top-Left)",
-            "2. Click North-East Corner (Top-Right)",
-            "3. Click South-East Corner (Bottom-Right)",
-            "4. Click South-West Corner (Bottom-Left)",
-            "Done!"
-        ]
-        if len(self.clicks) < 4:
-            msg = labels[len(self.clicks)]
-            self.status_label.config(text=f"SETUP: {msg}", fg="#00ffff")
-        else:
-            self.status_label.config(text="Processing...", fg="#00ff00")
-            self.click_done_var.set(True)
-
-    def _calculate_geometry(self, latlon_corners: Dict[str, Tuple[float, float]], pixel_corners: Dict[str, Tuple[float, float]]):
-        """
-        Calculate UL and Pixel Size based on Lat/Lon and Pixel coordinates.
-        """
-        # Project Lat/Lon to Meters (LCC)
-        nw_m = self.lcc.project(*latlon_corners['nw'])
-        ne_m = self.lcc.project(*latlon_corners['ne'])
-        se_m = self.lcc.project(*latlon_corners['se'])
-        sw_m = self.lcc.project(*latlon_corners['sw'])
-        
-        # Get Pixel Coordinates (these are raw image pixels, not screen coords)
-        # Note: self.clicks stores (x, y) in raw image coordinates
-        nw_p = pixel_corners['nw']
-        ne_p = pixel_corners['ne']
-        se_p = pixel_corners['se']
-        sw_p = pixel_corners['sw']
-        
-        # Calculate Width (Meters)
-        width_top_m = math.sqrt((ne_m[0] - nw_m[0])**2 + (ne_m[1] - nw_m[1])**2)
-        width_bot_m = math.sqrt((se_m[0] - sw_m[0])**2 + (se_m[1] - sw_m[1])**2)
-        avg_width_m = (width_top_m + width_bot_m) / 2
-        
-        # Calculate Width (Pixels)
-        width_top_p = math.sqrt((ne_p[0] - nw_p[0])**2 + (ne_p[1] - nw_p[1])**2)
-        width_bot_p = math.sqrt((se_p[0] - sw_p[0])**2 + (se_p[1] - sw_p[1])**2)
-        avg_width_p = (width_top_p + width_bot_p) / 2
-        
-        # Calculate Height (Meters)
-        height_left_m = math.sqrt((sw_m[0] - nw_m[0])**2 + (sw_m[1] - nw_m[1])**2)
-        height_right_m = math.sqrt((se_m[0] - ne_m[0])**2 + (se_m[1] - ne_m[1])**2)
-        avg_height_m = (height_left_m + height_right_m) / 2
-        
-        # Calculate Height (Pixels)
-        height_left_p = math.sqrt((sw_p[0] - nw_p[0])**2 + (sw_p[1] - nw_p[1])**2)
-        height_right_p = math.sqrt((se_p[0] - ne_p[0])**2 + (se_p[1] - ne_p[1])**2)
-        avg_height_p = (height_left_p + height_right_p) / 2
-        
-        # Calculate Resolution
-        pixel_w = avg_width_m / avg_width_p
-        pixel_h = -(avg_height_m / avg_height_p) # Negative for GeoTIFF
-        
-        # Calculate UL (Upper Left)
-        # We use the NW click as the anchor
-        # NW_M_X = UL_X + (NW_P_X * PIXEL_W)
-        # => UL_X = NW_M_X - (NW_P_X * PIXEL_W)
-        
-        # However, LCC projection might be rotated relative to image.
-        # For simplicity in this "North Up" aligner, we assume mostly aligned.
-        # Better: Use the min_x/max_y from projected corners as a starting point,
-        # but that ignores the pixel offsets.
-        
-        # Let's use the NW point alignment:
-        # projected x = ul_x + pixel_x * pixel_w
-        # projected y = ul_y + pixel_y * pixel_h
-        
-        ul_x = nw_m[0] - (nw_p[0] * pixel_w)
-        ul_y = nw_m[1] - (nw_p[1] * pixel_h)
-        
-        # Update Config
-        Config.BASE_PIXEL_WIDTH = pixel_w
-        Config.BASE_PIXEL_HEIGHT = pixel_h
-        Config.DEFAULT_UL_X = ul_x
-        Config.DEFAULT_UL_Y = ul_y
-        
-        logger.info(f"Calculated Geometry from Clicks:")
-        logger.info(f"  Pixel Size: {pixel_w:.4f}, {pixel_h:.4f}")
-        logger.info(f"  UL: {ul_x:.3f}, {ul_y:.3f}")
-        
-        # Re-init projection to pick up new constants
-        self.reinitialize_projection()
-
-    # --- Click Handling ---
-    def handle_click(self, event):
-        """Handle mouse click events."""
-        if self.click_mode:
-            self.on_click(event)
-        else:
-            self.start_drag(event, aligning=False)
-
-    def on_click(self, event):
-        """Record a click for GCP setup."""
-        if not self.original_img: return
-
-        # Calculate click position in image coordinates
-        img_screen_x = self.view_pan_x + (self.align_x * self.scale)
-        img_screen_y = self.view_pan_y + (self.align_y * self.scale)
-        
-        click_x = (event.x - img_screen_x) / self.scale
-        click_y = (event.y - img_screen_y) / self.scale
-        
-        # Valid Click Check
-        if click_x < 0 or click_y < 0 or click_x > self.orig_w or click_y > self.orig_h: return
-
-        self.clicks.append((click_x, click_y))
-        
-        # Draw Marker
-        r = 5
-        # Draw on canvas relative to screen
-        # We need to store the ID to remove it later if needed, but for now we just clear all on reload
-        # Actually, we should draw it in screen coords for now
-        
-        # But wait, if we zoom/pan, the marker will stay at screen coords if we just draw it once.
-        # We need to redraw markers in redraw() or just accept they are temporary during setup.
-        # Since setup blocks interaction (wait_variable), panning/zooming might not be active or needed?
-        # The user CAN zoom/pan during setup because events are bound.
-        # So we should probably add markers to a list and draw them in redraw().
-        
-        # For simplicity in this "modal" phase, let's just draw them and assume user won't pan much 
-        # OR better: add to a temporary list that redraw() knows about.
-        
-        # Let's just draw them for immediate feedback.
-        dot_id = self.canvas.create_oval(event.x-r, event.y-r, event.x+r, event.y+r, fill="red", outline="yellow", tags="gcp_marker")
-        self.click_ids.append(dot_id)
-        
-        self._update_click_status()
-        
-        # Force a Loupe Update
-        self.update_loupe(event)
-        
-        # Check if done
-        if len(self.clicks) == 4:
-            # Small delay to let user see the last dot
-            self.root.after(200, lambda: self.click_done_var.set(True))
-
-    # --- Loupe Methods ---
     def enable_lock(self, event):
         if not self.loupe_locked and 'img' in self.loupe_items:
             coords = self.canvas.coords(self.loupe_items['img'])
@@ -1482,358 +215,219 @@ class SmartAlignApp:
         self.loupe_locked = False
 
     def update_loupe(self, event):
-        if not self.original_img or not self.click_mode: 
-            self.hide_loupe(event)
-            return
-
-        # Calc coordinates in raw image pixels
-        # self.view_pan_x/y are viewport offsets
-        # self.scale is view zoom
-        # self.align_x/y are image alignment offsets (should be 0 during setup)
+        if not self.original_img: return
+        raw_x = (event.x - self.x_offset) / self.scale_factor
+        raw_y = (event.y - self.y_offset) / self.scale_factor
         
-        # Screen to Image Transform:
-        # screen_x = view_pan_x + (align_x * scale) + (img_x * scale)
-        # => img_x = (screen_x - view_pan_x) / scale - align_x
-        
-        # But wait, load_image centers the image.
-        # Let's look at redraw():
-        # img_x = self.view_pan_x + (self.align_x * self.scale)
-        # img_y = self.view_pan_y + (self.align_y * self.scale)
-        # self.canvas.create_image(img_x, img_y, ...)
-        
-        # So the Top-Left of the image on screen is at (img_x, img_y).
-        img_screen_x = self.view_pan_x + (self.align_x * self.scale)
-        img_screen_y = self.view_pan_y + (self.align_y * self.scale)
-        
-        raw_x = (event.x - img_screen_x) / self.scale
-        raw_y = (event.y - img_screen_y) / self.scale
-        
-        # Check bounds
         if raw_x < 0 or raw_y < 0 or raw_x > self.orig_w or raw_y > self.orig_h:
-            self.hide_loupe(event)
-            return
+            self.hide_loupe(event); return
 
-        # Crop & Zoom
         src_r = (self.loupe_size / 2) / self.zoom_level
-        left = max(0, raw_x - src_r)
-        top = max(0, raw_y - src_r)
-        right = min(self.orig_w, raw_x + src_r)
-        bottom = min(self.orig_h, raw_y + src_r)
+        left = max(0, raw_x - src_r); top = max(0, raw_y - src_r)
+        right = min(self.orig_w, raw_x + src_r); bottom = min(self.orig_h, raw_y + src_r)
         
         try:
             crop = self.original_img.crop((left, top, right, bottom))
             zoom_img = crop.resize((self.loupe_size, self.loupe_size), Image.Resampling.NEAREST)
             self.tk_loupe_img = ImageTk.PhotoImage(zoom_img)
-            
-            # Position Logic
             if self.loupe_locked:
                 lx, ly = self.locked_coords
             else:
-                lx = event.x + 20
-                ly = event.y + 20
-                
-                # Boundary Flip
+                lx = event.x + 20; ly = event.y + 20
                 if lx + self.loupe_size > self.canvas.winfo_width():
                     lx = event.x - self.loupe_size - 20
                 if ly + self.loupe_size > self.canvas.winfo_height():
                     ly = event.y - self.loupe_size - 20
 
-            # Create or Update Items
             if 'img' not in self.loupe_items:
-                # Init Loupe Elements
                 self.loupe_items['img'] = self.canvas.create_image(lx, ly, anchor=tk.NW, image=self.tk_loupe_img)
                 self.loupe_items['border'] = self.canvas.create_rectangle(lx, ly, lx+self.loupe_size, ly+self.loupe_size, outline="yellow", width=2)
-                
-                cx = lx + self.loupe_size/2
-                cy = ly + self.loupe_size/2
+                cx = lx + self.loupe_size/2; cy = ly + self.loupe_size/2
                 self.loupe_items['v_line'] = self.canvas.create_line(cx, ly, cx, ly+self.loupe_size, fill="red")
                 self.loupe_items['h_line'] = self.canvas.create_line(lx, cy, lx+self.loupe_size, cy, fill="red")
             else:
-                # Update Existing
                 self.canvas.itemconfig(self.loupe_items['img'], image=self.tk_loupe_img)
                 self.canvas.coords(self.loupe_items['img'], lx, ly)
                 self.canvas.coords(self.loupe_items['border'], lx, ly, lx+self.loupe_size, ly+self.loupe_size)
-                
-                cx = lx + self.loupe_size/2
-                cy = ly + self.loupe_size/2
+                cx = lx + self.loupe_size/2; cy = ly + self.loupe_size/2
                 self.canvas.coords(self.loupe_items['v_line'], cx, ly, cx, ly+self.loupe_size)
                 self.canvas.coords(self.loupe_items['h_line'], lx, cy, lx+self.loupe_size, cy)
-                
-                # Raise to Top
                 for key in self.loupe_items:
                     self.canvas.tag_raise(self.loupe_items[key])
-                
         except Exception as e:
-            pass
+            print(f"Zoom error: {e}")
 
     def hide_loupe(self, event):
-        # Only hide if we are truly leaving (prevents flicker)
         if 'img' in self.loupe_items:
             for key in self.loupe_items:
                 self.canvas.delete(self.loupe_items[key])
             self.loupe_items = {}
 
+    # ----------------- Click / Status -----------------
+    def on_click(self, event):
+        if not self.current_image_path: return
+        click_x = (event.x - self.x_offset) / self.scale_factor
+        click_y = (event.y - self.y_offset) / self.scale_factor
+        if click_x < 0 or click_y < 0 or click_x > self.orig_w or click_y > self.orig_h: return
 
-class SettingsDialog:
-    """Dialog for editing configuration parameters."""
-    
-    def __init__(self, parent, app):
-        self.parent = parent
-        self.app = app
-        self.window = tk.Toplevel(parent)
-        self.window.title("Settings")
-        self.window.geometry("400x500")
-        self.window.configure(bg="#2b2b2b")
-        
-        self.entries = {}
-        
-        # Parameters to edit
-        self.params = [
-            ("Latitude 1", "LAT_1", float),
-            ("Latitude 2", "LAT_2", float),
-            ("Latitude Origin", "LAT_0", float),
-            ("Longitude Origin", "LON_0", float),
-            ("Base Pixel Width", "BASE_PIXEL_WIDTH", float),
-            ("Base Pixel Height", "BASE_PIXEL_HEIGHT", float),
-            ("Default UL X", "DEFAULT_UL_X", float),
-            ("Default UL Y", "DEFAULT_UL_Y", float),
+        self.clicks.append((click_x, click_y))
+        r = 5
+        dot_id = self.canvas.create_oval(event.x-r, event.y-r, event.x+r, event.y+r, fill="red", outline="yellow")
+        self.click_ids.append(dot_id)
+        self.update_status()
+        self.update_loupe(event)
+        if len(self.clicks) == 6:
+            self.save_and_next()
+
+    def undo_click(self, event):
+        if not self.clicks: return
+        self.clicks.pop()
+        if self.click_ids:
+            last_id = self.click_ids.pop()
+            self.canvas.delete(last_id)
+        self.update_status()
+
+    def update_status(self):
+        count = len(self.clicks)
+        filename = os.path.basename(self.current_image_path)
+        labels = [
+            "1. Top-Left", "2. Top-Mid", "3. Top-Right",
+            "4. Bot-Left", "5. Bot-Mid", "6. Bot-Right",
+            "Done"
         ]
-        
-        self._setup_ui()
-        self.window.transient(parent)
-        self.window.grab_set()
-        
-    def _setup_ui(self):
-        main_frame = tk.Frame(self.window, bg="#2b2b2b", padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        tk.Label(
-            main_frame,
-            text="Projection Parameters",
-            font=("Arial", 14, "bold"),
-            bg="#2b2b2b",
-            fg="white"
-        ).pack(pady=(0, 20))
-        
-        for label_text, config_key, _ in self.params:
-            frame = tk.Frame(main_frame, bg="#2b2b2b")
-            frame.pack(fill=tk.X, pady=5)
-            
-            tk.Label(
-                frame,
-                text=label_text,
-                width=20,
-                anchor="w",
-                bg="#2b2b2b",
-                fg="#ccc"
-            ).pack(side=tk.LEFT)
-            
-            entry = tk.Entry(frame, bg="white", fg="black", insertbackground="black") # High contrast
-            entry.insert(0, str(getattr(Config, config_key)))
-            entry.pack(side=tk.RIGHT, expand=True, fill=tk.X)
-            self.entries[config_key] = entry
-            
-        btn_frame = tk.Frame(main_frame, bg="#2b2b2b")
-        btn_frame.pack(pady=20, fill=tk.X)
-        
-        tk.Button(
-            btn_frame,
-            text="Save",
-            command=self.save,
-            bg="#4CAF50",
-            fg="white",
-            font=("Arial", 10, "bold"),
-            relief="flat",
-            padx=20
-        ).pack(side=tk.RIGHT, padx=5)
-        
-        tk.Button(
-            btn_frame,
-            text="Cancel",
-            command=self.window.destroy,
-            bg="#555",
-            fg="white",
-            font=("Arial", 10),
-            relief="flat",
-            padx=20
-        ).pack(side=tk.RIGHT, padx=5)
-        
-    def save(self):
-        try:
-            for _, config_key, type_func in self.params:
-                value_str = self.entries[config_key].get()
-                value = type_func(value_str)
-                setattr(Config, config_key, value)
-            
-            self.app.reinitialize_projection()
-            messagebox.showinfo("Success", "Settings updated successfully")
-            self.window.destroy()
-            
-        except ValueError as e:
-            messagebox.showerror("Error", "Invalid input. Please check your values.")
+        if count < 6:
+            next_pt = labels[count]
+            self.status_label.config(text=f"{filename}\nClick: {next_pt}")
+        else:
+            self.status_label.config(text="Processing...")
 
+    # ----------------- Script Generation -----------------
+    def _datum_epsg_from_menu(self):
+        val = self.datum_var.get()
+        if "4326" in val: return "EPSG:4326"
+        if "4267" in val: return "EPSG:4267"
+        return "EPSG:4269"
 
+    def _lcc_proj_string(self):
+        lat1 = self.lat1.get().strip()
+        lat2 = self.lat2.get().strip()
+        lat0 = self.lat0.get().strip()
+        lon0 = self.lon0.get().strip()
+        x0   = self.x0.get().strip() or "0"
+        y0   = self.y0.get().strip() or "0"
+        # NAD83 is a sensible default; user can still warp to another target later.
+        # Using +datum instead of explicit +ellps keeps it simple for script users.
+        return f"+proj=lcc +lat_1={lat1} +lat_2={lat2} +lat_0={lat0} +lon_0={lon0} +x_0={x0} +y_0={y0} +datum=NAD83 +units=m +no_defs"
 
-class ProjectionSetupDialog:
-    """Dialog for setting up projection parameters."""
-    
-    def __init__(self, parent, app):
-        self.window = tk.Toplevel(parent)
-        self.window.title("Step 1: Projection Setup")
-        self.window.geometry("500x400")
-        self.window.configure(bg="#2b2b2b")
-        self.result = False
-        
-        self._setup_ui()
-        self.window.transient(parent)
-        self.window.grab_set()
-        
-    def _setup_ui(self):
-        main = tk.Frame(self.window, bg="#2b2b2b", padx=20, pady=20)
-        main.pack(fill=tk.BOTH, expand=True)
-        
-        tk.Label(
-            main, text="Enter Projection Parameters",
-            font=("Arial", 14, "bold"), bg="#2b2b2b", fg="white"
-        ).pack(pady=(0, 20))
-        
-        # Entries
-        self.entries = {}
-        fields = [
-            ("Latitude 1 (Standard Parallel)", "LAT_1"),
-            ("Latitude 2 (Standard Parallel)", "LAT_2"),
-            ("Longitude Origin (Central Meridian)", "LON_0")
-        ]
-        
-        for label, key in fields:
-            frame = tk.Frame(main, bg="#2b2b2b")
-            frame.pack(fill=tk.X, pady=5)
-            tk.Label(frame, text=label, width=30, anchor="w", bg="#2b2b2b", fg="#ccc").pack(side=tk.LEFT)
-            entry = tk.Entry(frame, bg="white", fg="black", insertbackground="black") # High contrast
-            entry.insert(0, str(getattr(Config, key)))
-            entry.pack(side=tk.RIGHT, expand=True, fill=tk.X)
-            self.entries[key] = entry
-            
-        # Auto-calculated Lat Origin
-        self.lat0_var = tk.StringVar(value=f"Lat Origin: {Config.LAT_0:.4f} (Auto)")
-        tk.Label(
-            main, textvariable=self.lat0_var,
-            font=("Arial", 10, "italic"), bg="#2b2b2b", fg="#888"
-        ).pack(pady=10)
-        
-        # Buttons
-        btn_frame = tk.Frame(main, bg="#2b2b2b")
-        btn_frame.pack(pady=20)
-        tk.Button(
-            btn_frame, text="Next >", command=self.save,
-            bg="#4CAF50", fg="white", font=("Arial", 11, "bold")
-        ).pack(side=tk.RIGHT, padx=5)
-        
-    def save(self):
-        try:
-            lat1 = float(self.entries["LAT_1"].get())
-            lat2 = float(self.entries["LAT_2"].get())
-            lon0 = float(self.entries["LON_0"].get())
-            
-            # Update Config
-            Config.LAT_1 = lat1
-            Config.LAT_2 = lat2
-            Config.LON_0 = lon0
-            Config.LAT_0 = (lat1 + lat2) / 2  # Auto-calculate midpoint
-            
-            self.result = True
-            self.window.destroy()
-        except ValueError:
-            messagebox.showerror("Error", "Invalid numeric input")
+    def _warp_flags(self):
+        method = self.warp_model.get()
+        resamp = self.resample.get()
+        flags = f"-r {resamp}"
+        if method == "tps":
+            flags += " -tps"
+        elif method == "order1":
+            flags += " -order 1"
+        elif method == "order3":
+            flags += " -order 3"
+        else:
+            flags += " -order 2"
+        tol = self.refine_tol.get().strip()
+        min_gcps = self.refine_min.get().strip()
+        if tol and min_gcps:
+            flags += f" -refine_gcps {tol} {min_gcps}"
+        return flags
 
+    def save_and_next(self):
+        # Collect 6 entered geog coords (lon,lat) paired to 6 clicks (pixel,line)
+        geo_coords = []
+        for ex, ey in self.entries:
+            geo_coords.append((ex.get().strip(), ey.get().strip()))
 
-class CornersDialog:
-    """Dialog for entering 4 corner coordinates."""
-    
-    def __init__(self, parent, app):
-        self.window = tk.Toplevel(parent)
-        self.window.title("Step 2: Corner Coordinates")
-        self.window.geometry("600x500")
-        self.window.configure(bg="#2b2b2b")
-        self.result = None
-        
-        self._setup_ui()
-        self.window.transient(parent)
-        self.window.grab_set()
-        
-    def _setup_ui(self):
-        main = tk.Frame(self.window, bg="#2b2b2b", padx=20, pady=20)
-        main.pack(fill=tk.BOTH, expand=True)
-        
-        tk.Label(
-            main, text="Enter 4 Corner Coordinates (Lat, Lon)",
-            font=("Arial", 14, "bold"), bg="#2b2b2b", fg="white"
-        ).pack(pady=(0, 10))
-        
-        tk.Label(
-            main, text="Format: Decimal Degrees (e.g., 34.5, -98.2)",
-            font=("Arial", 10), bg="#2b2b2b", fg="#aaa"
-        ).pack(pady=(0, 20))
-        
-        self.entries = {}
-        corners = [
-            ("North-West (Top-Left)", "nw"),
-            ("North-East (Top-Right)", "ne"),
-            ("South-East (Bottom-Right)", "se"),
-            ("South-West (Bottom-Left)", "sw"),
-        ]
-        
-        for label, key in corners:
-            frame = tk.Frame(main, bg="#2b2b2b")
-            frame.pack(fill=tk.X, pady=10)
-            tk.Label(frame, text=label, width=25, anchor="w", bg="#2b2b2b", fg="#ccc").pack(side=tk.LEFT)
-            
-            # Lat
-            tk.Label(frame, text="Lat:", bg="#2b2b2b", fg="#888").pack(side=tk.LEFT, padx=5)
-            lat_ent = tk.Entry(frame, width=15, bg="white", fg="black")
-            lat_ent.pack(side=tk.LEFT)
-            
-            # Lon
-            tk.Label(frame, text="Lon:", bg="#2b2b2b", fg="#888").pack(side=tk.LEFT, padx=5)
-            lon_ent = tk.Entry(frame, width=15, bg="white", fg="black")
-            lon_ent.pack(side=tk.LEFT)
-            
-            self.entries[key] = (lat_ent, lon_ent)
-            
-        # Buttons
-        btn_frame = tk.Frame(main, bg="#2b2b2b")
-        btn_frame.pack(pady=30)
-        tk.Button(
-            btn_frame, text="Finish Setup", command=self.save,
-            bg="#2196F3", fg="white", font=("Arial", 11, "bold")
-        ).pack(side=tk.RIGHT, padx=5)
-        
-    def save(self):
-        try:
-            res = {}
-            for key, (lat_ent, lon_ent) in self.entries.items():
-                lat = float(lat_ent.get())
-                lon = float(lon_ent.get())
-                res[key] = (lat, lon)
-            
-            self.result = res
-            self.window.destroy()
-        except ValueError:
-            messagebox.showerror("Error", "Invalid coordinates. Please enter numbers.")
+        # Build strings
+        lcc_proj = self._lcc_proj_string()
+        gcp_srs_geog = self._datum_epsg_from_menu()
+        preproject = bool(self.preproject_var.get())
+        warp_flags = self._warp_flags()
+        target = self.target_epsg.get().strip()
 
-def main():
-    """Main entry point for the application."""
-    try:
-        logger.info("Starting GeoTIFF Aligner application")
-        root = tk.Tk()
-        app = SmartAlignApp(root)
-        root.mainloop()
-        logger.info("Application closed")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        messagebox.showerror("Fatal Error", f"Application failed to start: {str(e)}")
-        raise
+        filename = os.path.basename(self.current_image_path)
+        safe_name = filename.replace('"', '\\"')  # minimal safety for quotes
 
+        # Prepare GCP lines (bash will compute projected x/y if preprojecting)
+        # We'll create variables X1 Y1 ... X6 Y6 when preprojecting; otherwise use lon/lat directly.
+        lines = []
+        lines.append(f"echo 'Processing {safe_name}...'")
+        lines.append(f"src='{safe_name}'")
+        lines.append(f"tmp='georeferenced/temp_{safe_name}'")
+        lines.append(f"lcc='georeferenced/lcc_{safe_name}'")
+
+        # Write the LCC PROJ string into a shell var (careful with quotes)
+        lines.append(f"LCC_PROJ=\"{lcc_proj}\"")
+        lines.append(f"GEO_SRS=\"{gcp_srs_geog}\"")
+        lines.append("")
+
+        # Preproject GCPs with gdaltransform (recommended)
+        gcp_vars = []
+        for i in range(6):
+            lon = geo_coords[i][0]
+            lat = geo_coords[i][1]
+            if preproject:
+                # project lon/lat -> X Y in LCC
+                lines.append(f"read X{i+1} Y{i+1} _ <<< $(echo \"{lon} {lat}\" | gdaltransform -s_srs \"$GEO_SRS\" -t_srs \"$LCC_PROJ\")")
+                gcp_vars.append((f"${{X{i+1}}}", f"${{Y{i+1}}}"))
+            else:
+                # keep as lon/lat; GCP CRS stays geographic
+                gcp_vars.append((lon, lat))
+
+        # Build -gcp args paired with pixel/line
+        gcp_string_parts = []
+        for i in range(6):
+            pix_x = f"{self.clicks[i][0]:.3f}"
+            pix_y = f"{self.clicks[i][1]:.3f}"
+            gx, gy = gcp_vars[i]
+            gcp_string_parts.append(f"-gcp {pix_x} {pix_y} {gx} {gy}")
+        gcp_string = " ".join(gcp_string_parts)
+
+        # gdal_translate with correct GCP CRS
+        if preproject:
+            # GCPs are in LCC, so declare that SRS on the GCPs
+            cmd_translate = f"gdal_translate -of GTiff -a_srs \"$LCC_PROJ\" {gcp_string} \"$src\" \"$tmp\""
+        else:
+            # GCPs are in geographic datum SRS
+            cmd_translate = f"gdal_translate -of GTiff -a_srs \"$GEO_SRS\" {gcp_string} \"$src\" \"$tmp\""
+        lines.append(cmd_translate)
+
+        # gdalwarp #1: rectify
+        if preproject:
+            # Already in LCC GCP space → rectify into LCC (no -t_srs): output lcc_
+            cmd_warp1 = f"gdalwarp {warp_flags} -dstnodata 0 -overwrite \"$tmp\" \"$lcc\""
+        else:
+            # GCPs in geographic → warp into LCC
+            cmd_warp1 = f"gdalwarp {warp_flags} -t_srs \"$LCC_PROJ\" -dstnodata 0 -overwrite \"$tmp\" \"$lcc\""
+        lines.append(cmd_warp1)
+        lines.append("rm \"$tmp\"")
+
+        # Optional reprojection to final target CRS
+        if target:
+            out_final = f"georeferenced/{safe_name}"
+            cmd_warp2 = f"gdalwarp -r {self.resample.get()} -t_srs EPSG:{target} -dstnodata 0 -overwrite \"$lcc\" \"{out_final}\""
+            lines.append(cmd_warp2)
+            lines.append("rm \"$lcc\"")
+        else:
+            # Keep LCC as final (rename)
+            out_final = f"georeferenced/{safe_name}"
+            lines.append(f"mv \"$lcc\" \"{out_final}\"")
+
+        lines.append("")  # blank line between items
+
+        with open(self.output_script, "a") as f:
+            f.write("\n".join(lines))
+
+        print(f"Logged {filename}")
+        self.current_index += 1
+        self.load_image()
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = GeorefApp(root)
+    root.mainloop()
