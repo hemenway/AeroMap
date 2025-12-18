@@ -1036,6 +1036,7 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://unpkg.com/leaflet-boundary-canvas@1.0.0/src/Leaflet.BoundaryCanvas.js"></script>
 
   <script>
     /** CONFIGURATION **/
@@ -1047,6 +1048,13 @@
       initialView: { center: [32.7767, -96.7970], zoom: 10 },
       bounds: [[32, -102], [34, -96]],
       frames: [] // Will be populated dynamically
+    };
+
+    const BOUNDARY_GEOJSON = {
+      "type": "Polygon",
+      "coordinates": [[
+        [-102, 32], [-96, 32], [-96, 34], [-102, 34], [-102, 32]
+      ]]
     };
 
     /** UTILITIES **/
@@ -1168,7 +1176,7 @@
           const tileJson = await res.json();
 
           const tileUrl = tileJson.tiles[0];
-          const layer = L.tileLayer(tileUrl, {
+          const baseLayer = L.tileLayer(tileUrl, {
             minZoom: tileJson.minzoom || 0,
             maxZoom: 22,
             tileSize: 256,
@@ -1177,6 +1185,11 @@
             keepBuffer: 2,
             bounds: CONFIG.bounds
           });
+
+          // Use BoundaryCanvas if available, otherwise fallback to baseLayer
+          const layer = L.TileLayer.BoundaryCanvas ? L.TileLayer.BoundaryCanvas.createFromLayer(baseLayer, {
+            boundary: BOUNDARY_GEOJSON
+          }) : baseLayer;
 
           this.cache[filename] = { layer, bounds: tileJson.bounds };
           return this.cache[filename];
