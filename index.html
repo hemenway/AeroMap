@@ -849,10 +849,6 @@
       }
     }
 
-    .tick-label {
-      display: none;
-    }
-
     /* Side-by-Side View */
     #map2 {
       position: absolute;
@@ -1752,31 +1748,50 @@
       // Auto-locate via IP if no URL params
       if (!latParam && !lngParam) {
         try {
-          // Use a free IP geo API (e.g. ip-api.com - robust, free for non-commercial)
-          fetch('http://ip-api.com/json/')
+          // Use ipapi.co - secure HTTPS endpoint
+          fetch('https://ipapi.co/json/')
             .then(res => res.json())
             .then(data => {
-              if (data && data.lat && data.lon) {
+              if (data && data.latitude && data.longitude) {
                 // Silent move, no toast
-                mapCtrl.map.flyTo([data.lat, data.lon], 10, { duration: 2.0 });
+                mapCtrl.map.flyTo([data.latitude, data.longitude], 10, { duration: 2.0 });
               }
             })
-            .catch(e => console.log('IP Geo failed', e));
+            .catch(e => {
+              console.log('IP Geo failed', e);
+              // Fallback: show a subtle hint that geolocation failed
+              Utils.toast('Unable to detect location', 2000);
+            });
         } catch (e) {
           console.log('IP Geo Error', e);
         }
       }
 
-      // Search Handler
+      // Search Handler with rate limiting
+      let lastSearchTime = 0;
+      const SEARCH_COOLDOWN = 1000; // 1 second between searches
+
       searchInput.addEventListener('keydown', async (e) => {
         if (e.key === 'Enter') {
           const query = searchInput.value.trim();
           if (!query) return;
 
+          // Rate limiting check
+          const now = Date.now();
+          if (now - lastSearchTime < SEARCH_COOLDOWN) {
+            Utils.toast("Please wait before searching again");
+            return;
+          }
+          lastSearchTime = now;
+
           try {
             Utils.toast("Searching...");
-            // Use Nominatim
-            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`);
+            // Use Nominatim with proper headers (respecting usage policy)
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`, {
+              headers: {
+                'User-Agent': 'AeroMap Historical Chart Viewer (https://archive.aero)'
+              }
+            });
             const data = await res.json();
 
             if (data && data.length > 0) {
@@ -1818,18 +1833,28 @@
         }
       });
 
-      // Sync Maps Function
+      // Sync Maps Function with debouncing to prevent infinite loops
+      let syncTimeout = null;
       function syncMaps(source, target) {
         if (!isCompareMode || isSyncing) return;
         isSyncing = true;
+
+        // Clear any pending sync timeout
+        if (syncTimeout) {
+          clearTimeout(syncTimeout);
+        }
+
         target.setView(source.getCenter(), source.getZoom(), { animate: false });
-        // Prevent infinite loop by resetting flag in next tick or after event
-        // Leaflet events are synchronous, so we can just reset after setView
-        isSyncing = false;
+
+        // Reset flag after a short delay to ensure all events are processed
+        syncTimeout = setTimeout(() => {
+          isSyncing = false;
+          syncTimeout = null;
+        }, 50);
       }
 
-      mapCtrl.map.on('move', () => syncMaps(mapCtrl.map, mapCtrl2.map));
-      mapCtrl2.map.on('move', () => syncMaps(mapCtrl2.map, mapCtrl.map));
+      mapCtrl.map.on('moveend', () => syncMaps(mapCtrl.map, mapCtrl2.map));
+      mapCtrl2.map.on('moveend', () => syncMaps(mapCtrl2.map, mapCtrl.map));
 
       // Toggle Compare Mode
       compareBtn.addEventListener('click', () => {
